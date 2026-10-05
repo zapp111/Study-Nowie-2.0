@@ -1,0 +1,163 @@
+@import 'tailwindcss';
+
+/*
+  Soft blush and white. Warm rather than clinical, low contrast on the
+  background, high contrast on the text, and a single pink accent that carries
+  every interactive element.
+*/
+
+@theme {
+  --color-blush-50: #fff7fa;
+  --color-blush-100: #ffeaf2;
+  --color-blush-200: #ffd4e5;
+  --color-blush-300: #ffb3d1;
+  --color-blush-400: #ff8cb8;
+  --color-blush-500: #f8699f;
+  --color-blush-600: #e8457f;
+  --color-blush-700: #c62d63;
+  --color-blush-800: #9d244e;
+  --color-blush-900: #7a1f3f;
+
+  --color-ink-50: #f8f7f8;
+  --color-ink-100: #efedf0;
+  --color-ink-200: #ddd9e0;
+  --color-ink-300: #bdb6c3;
+  --color-ink-400: #968ca0;
+  --color-ink-500: #776c82;
+  --color-ink-600: #5f5569;
+  --color-ink-700: #4a4252;
+  --color-ink-800: #342e3b;
+  --color-ink-900: #241f2a;
+  --color-ink-950: #17131b;
+
+  --radius-xl2: 1.25rem;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans Devanagari", sans-serif;
+}
+
+:root {
+  --bg: #fff9fb;
+  --surface: #ffffff;
+  --surface-muted: #fff4f8;
+  --border: #f6e1ea;
+  --text: #241f2a;
+  --text-muted: #776c82;
+  --accent: #e8457f;
+  --accent-soft: #ffeaf2;
+  --ring: #ff8cb8;
+}
+
+.dark {
+  --bg: #17131b;
+  --surface: #211b27;
+  --surface-muted: #2a2231;
+  --border: #392f42;
+  --text: #f6f2f7;
+  --text-muted: #b1a6bb;
+  --accent: #ff8cb8;
+  --accent-soft: #3a2334;
+  --ring: #ff8cb8;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
+  --color-line: var(--border);
+  --color-text: var(--text);
+  --color-text-muted: var(--text-muted);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background-color: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Keyboard users get a clear, consistent focus ring everywhere. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+    border-radius: 0.5rem;
+  }
+
+  ::selection {
+    background: var(--accent-soft);
+    color: var(--text);
+  }
+}
+
+@layer utilities {
+  .card {
+    background-color: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xl2);
+    box-shadow: 0 1px 2px rgb(36 31 42 / 0.04), 0 8px 24px -16px rgb(36 31 42 / 0.12);
+  }
+
+  .shimmer {
+    background-image: linear-gradient(90deg, var(--surface-muted) 0%, var(--surface) 50%, var(--surface-muted) 100%);
+    background-size: 200% 100%;
+    animation: shimmer 1.6s ease-in-out infinite;
+  }
+
+  .pop {
+    animation: pop 0.28s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+
+  .rise {
+    animation: rise 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+@keyframes pop {
+  0% {
+    transform: scale(0.82);
+  }
+  60% {
+    transform: scale(1.08);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}

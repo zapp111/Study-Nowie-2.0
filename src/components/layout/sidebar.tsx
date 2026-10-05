@@ -2,11 +2,22 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { AccountPanel } from './account-panel';
 import { ADMIN_ITEMS, BRAND_ICON, NAV_ITEMS } from './nav-items';
 import { cn, daysUntil } from '@/lib/utils';
 import { useProgress } from '@/lib/data/progress-store';
 
-export function SidebarContent({ onNavigate, isAdmin }: { onNavigate?: () => void; isAdmin?: boolean }) {
+export type SidebarAccount = { name: string; email: string | null };
+
+export function SidebarContent({
+  onNavigate,
+  isAdmin,
+  account,
+}: {
+  onNavigate?: () => void;
+  isAdmin?: boolean;
+  account?: SidebarAccount | null;
+}) {
   const pathname = usePathname();
   const { state } = useProgress();
   const left = daysUntil(state.profile.examDate);
@@ -57,6 +68,8 @@ export function SidebarContent({ onNavigate, isAdmin }: { onNavigate?: () => voi
           {left > 0 ? 'days until your first paper' : 'boards have started — you have got this'}
         </p>
       </div>
+
+      {account ? <AccountPanel name={account.name} email={account.email} /> : null}
     </div>
   );
 }

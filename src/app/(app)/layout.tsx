@@ -3,5 +3,10 @@ import { getCurrentProfile } from '@/lib/data/session';
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const profile = await getCurrentProfile();
-  return <AppShell isAdmin={profile.isAdmin}>{children}</AppShell>;
+  const account = profile.signedIn ? { name: profile.displayName, email: profile.email } : null;
+  return (
+    <AppShell isAdmin={profile.isAdmin} account={account}>
+      {children}
+    </AppShell>
+  );
 }

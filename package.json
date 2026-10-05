@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "seed:sql": "tsx scripts/generate-seed.ts"
+    "seed:sql": "tsx scripts/generate-seed.ts",
+    "setup:sql": "tsx scripts/generate-seed.ts && node scripts/bundle-setup.mjs"
   },
   "dependencies": {
     "@radix-ui/react-accordion": "^1.2.20",

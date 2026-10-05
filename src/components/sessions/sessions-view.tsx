@@ -59,14 +59,17 @@ export function SessionsView() {
       <PageHeader
         title="Study plan"
         description={
-          sessions.length === 1
-            ? 'One day in the plan so far. More get added as you go.'
-            : `${sessions.length} days in the plan so far. More get added as you go.`
+          sessions.length === 0
+            ? 'No study days are scheduled.'
+            : sessions.length === 1
+              ? 'One day in the plan so far.'
+              : `${sessions.length} days in the plan so far.`
         }
       />
 
-      <div className="mb-5 space-y-3">
-        <div className="relative">
+      {sessions.length > 0 ? (
+        <div className="mb-5 space-y-3">
+          <div className="relative">
           <Search
             className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-[var(--text-muted)]"
             aria-hidden="true"
@@ -95,13 +98,14 @@ export function SessionsView() {
               {p.label}
             </Button>
           ))}
+          </div>
         </div>
-      </div>
+      ) : null}
 
       {filtered.length === 0 ? (
         <div className="card px-6 py-12 text-center">
-          <p className="font-medium">Nothing matches that</p>
-          <p className="mt-1 text-sm text-[var(--text-muted)]">Try a chapter name, or clear the search.</p>
+          <p className="font-medium">No study days scheduled</p>
+          <p className="mt-1 text-sm text-[var(--text-muted)]">A new plan can be added when you are ready.</p>
         </div>
       ) : (
         <ul className="space-y-3">

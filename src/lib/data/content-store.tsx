@@ -220,16 +220,10 @@ export function ContentProvider({ children }: { children: React.ReactNode }) {
       if (queryError) throw queryError;
 
       setError(null);
-      const rows = (data ?? []) as unknown as SessionRow[];
-      if (rows.length > 0) {
-        setSessions(rows.map(mapRow));
-        setFromDatabase(true);
-      } else {
-        // Nothing added yet — keep the starter days visible rather than an
-        // empty app.
-        setSessions(BUNDLED_SESSIONS);
-        setFromDatabase(false);
-      }
+      // The schedule has been deliberately cleared. Do not resurrect old
+      // published rows from a database that has not run the cleanup migration.
+      setSessions(BUNDLED_SESSIONS);
+      setFromDatabase(false);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not load the study plan');
     } finally {

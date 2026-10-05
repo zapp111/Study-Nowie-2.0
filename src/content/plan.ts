@@ -30,7 +30,8 @@ import { SUBJECTS, type ChapterSeed, type SubjectSeed } from './subjects';
  *
  * Set this to `null` to generate the full plan through to the last paper.
  */
-// The old starter schedule has been cleared. New days can be added deliberately later.\nexport const BUNDLED_DAYS: number | null = 0;
+// The old starter schedule has been cleared. New days can be added deliberately later.
+export const BUNDLED_DAYS: number | null = 0;
 
 export const PLAN_START = '2025-10-05';
 export const EXAM_START = '2026-02-17';

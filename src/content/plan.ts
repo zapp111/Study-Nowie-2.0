@@ -76,7 +76,7 @@ export const DATESHEET: { slug: string; date: string; paper: string }[] = [
   { slug: 'maths', date: '2026-02-17', paper: 'Mathematics' },
   { slug: 'english', date: '2026-02-21', paper: 'English' },
   { slug: 'science', date: '2026-02-25', paper: 'Science' },
-  { slug: 'hindi', date: '2026-03-02', paper: 'Hindi' },
+  { slug: 'hindi', date: '2026-03-02', paper: 'Hindi A' },
   { slug: 'social-science', date: '2026-03-07', paper: 'Social Science' },
 ];
 

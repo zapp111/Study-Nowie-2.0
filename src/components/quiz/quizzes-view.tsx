@@ -9,23 +9,28 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
-import { allQuizzes, SUBJECT_LIST } from '@/lib/data/content';
+import { SUBJECT_LIST } from '@/lib/data/content';
+import { useContent } from '@/lib/data/content-store';
 import { useProgress } from '@/lib/data/progress-store';
 import { pct } from '@/lib/utils';
 
 export function QuizzesView() {
   const { state } = useProgress();
+  const { sessions } = useContent();
   const [subject, setSubject] = React.useState<string>('all');
 
   const entries = React.useMemo(() => {
     const seen = new Set<string>();
-    return allQuizzes().filter(({ block }) => {
+    const all = sessions.flatMap((session) =>
+      session.blocks.filter((b) => b.quiz).map((block) => ({ quiz: block.quiz!, block, session })),
+    );
+    return all.filter(({ block }) => {
       const key = `${block.subjectSlug}:${block.chapterName}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return subject === 'all' || block.subjectSlug === subject;
     });
-  }, [subject]);
+  }, [sessions, subject]);
 
   const best = React.useMemo(() => {
     const map = new Map<string, { score: number; total: number; attempts: number }>();

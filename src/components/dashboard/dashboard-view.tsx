@@ -8,8 +8,10 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardTitle } from '@/components/ui/card';
 import { ProgressBar, ProgressRing } from '@/components/ui/progress';
+import { EmptyState } from '@/components/ui/empty-state';
 import { CardSkeleton, Skeleton } from '@/components/ui/skeleton';
-import { PHASES, SESSIONS, sessionForDate } from '@/lib/data/content';
+import { PHASES } from '@/lib/data/content';
+import { sessionForToday, useContent } from '@/lib/data/content-store';
 import { useProgress } from '@/lib/data/progress-store';
 import {
   blockProgress,
@@ -25,26 +27,31 @@ import { daysUntil, formatLongDate, formatMinutes, greeting, todayIso } from '@/
 
 export function DashboardView({ fallbackName }: { fallbackName: string }) {
   const { state, ready } = useProgress();
+  const { sessions, loading } = useContent();
   const name = state.profile.displayName || fallbackName;
   const v = React.useMemo(() => ({ mathsLevel: state.profile.mathsLevel }), [state.profile.mathsLevel]);
   const today = todayIso();
 
-  const session = React.useMemo(() => sessionForDate(today), [today]);
-  const overall = React.useMemo(() => overallProgress(state, v), [state, v]);
-  const sProgress = React.useMemo(() => sessionProgress(session, state, v), [session, state, v]);
-  const pace = React.useMemo(() => pacing(state, v), [state, v]);
-  const quizzes = React.useMemo(() => pendingQuizzes(state, v, 4), [state, v]);
-  const done = React.useMemo(() => completedSessions(state, v), [state, v]);
-  const nextStep = React.useMemo(() => smallestNextStep(state, v), [state, v]);
+  const session = React.useMemo(() => sessionForToday(sessions, today), [sessions, today]);
+  const overall = React.useMemo(() => overallProgress(sessions, state, v), [sessions, state, v]);
+  const sProgress = React.useMemo(
+    () =>
+      session ? sessionProgress(session, state, v) : { total: 0, done: 0, percent: 0, complete: false, touched: false },
+    [session, state, v],
+  );
+  const pace = React.useMemo(() => pacing(sessions, state, v), [sessions, state, v]);
+  const quizzes = React.useMemo(() => pendingQuizzes(sessions, state, v, 4), [sessions, state, v]);
+  const done = React.useMemo(() => completedSessions(sessions, state, v), [sessions, state, v]);
+  const nextStep = React.useMemo(() => smallestNextStep(sessions, state, v), [sessions, state, v]);
   const streaks = React.useMemo(() => streak(state), [state]);
 
   const daysLeft = daysUntil(state.profile.examDate);
   const phase = PHASES.find((p) => today >= p.from && today <= p.to) ?? PHASES[PHASES.length - 1];
   const goal = state.profile.dailyGoalMinutes;
-  const upcoming = SESSIONS.filter((s) => s.date > today).slice(0, 3);
+  const upcoming = sessions.filter((s) => s.date > today).slice(0, 3);
   const dueMistakes = state.mistakes.filter((m) => !m.resolvedAt && m.reattemptOn <= today);
 
-  if (!ready) {
+  if (!ready || loading) {
     return (
       <div className="space-y-4">
         <Skeleton className="h-9 w-64" />
@@ -53,6 +60,21 @@ export function DashboardView({ fallbackName }: { fallbackName: string }) {
           <CardSkeleton />
           <CardSkeleton />
         </div>
+      </div>
+    );
+  }
+
+  if (!session) {
+    return (
+      <div className="space-y-4">
+        <h1 className="text-2xl font-semibold tracking-tight">
+          <span suppressHydrationWarning>{greeting()}</span>, {name}
+        </h1>
+        <EmptyState
+          icon={CalendarClock}
+          title="Nothing scheduled yet"
+          description="As soon as a day is added to the plan it shows up right here."
+        />
       </div>
     );
   }

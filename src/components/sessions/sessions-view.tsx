@@ -10,7 +10,8 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/field';
 import { ProgressBar } from '@/components/ui/progress';
 import { Skeleton } from '@/components/ui/skeleton';
-import { PHASES, SESSIONS, type Phase } from '@/lib/data/content';
+import { PHASES, type Phase } from '@/lib/data/content';
+import { useContent } from '@/lib/data/content-store';
 import { useProgress } from '@/lib/data/progress-store';
 import { isSessionLocked } from '@/lib/data/rules';
 import { sessionProgress } from '@/lib/data/stats';
@@ -18,6 +19,7 @@ import { formatDate, formatMinutes, todayIso } from '@/lib/utils';
 
 export function SessionsView() {
   const { state, ready } = useProgress();
+  const { sessions, loading } = useContent();
   const v = React.useMemo(() => ({ mathsLevel: state.profile.mathsLevel }), [state.profile.mathsLevel]);
   const today = todayIso();
   const [phase, setPhase] = React.useState<Phase | 'all'>('all');
@@ -25,7 +27,7 @@ export function SessionsView() {
 
   const filtered = React.useMemo(() => {
     const q = query.trim().toLowerCase();
-    return SESSIONS.filter((s) => {
+    return sessions.filter((s) => {
       if (phase !== 'all' && s.phase !== phase) return false;
       if (!q) return true;
       return (
@@ -34,14 +36,14 @@ export function SessionsView() {
         s.blocks.some((b) => b.chapterName.toLowerCase().includes(q))
       );
     });
-  }, [phase, query]);
+  }, [sessions, phase, query]);
 
   const todayRef = React.useRef<HTMLLIElement>(null);
   React.useEffect(() => {
     todayRef.current?.scrollIntoView({ block: 'center' });
   }, [ready]);
 
-  if (!ready) {
+  if (!ready || loading) {
     return (
       <div className="space-y-3">
         <Skeleton className="h-9 w-48" />
@@ -56,7 +58,11 @@ export function SessionsView() {
     <div>
       <PageHeader
         title="Study plan"
-        description={`${SESSIONS.length} days from 5 October to the last paper on 7 March. Highest-weightage chapters come first.`}
+        description={
+          sessions.length === 1
+            ? 'One day in the plan so far. More get added as you go.'
+            : `${sessions.length} days in the plan so far. More get added as you go.`
+        }
       />
 
       <div className="mb-5 space-y-3">

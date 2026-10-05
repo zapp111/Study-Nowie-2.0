@@ -1,6 +1,6 @@
 'use client';
 
-import { Database, Pencil, Plus, Trash2 } from 'lucide-react';
+import { Database, Plus, Trash2 } from 'lucide-react';
 import * as React from 'react';
 import { toast } from 'sonner';
 import { PageHeader } from '@/components/layout/page-header';
@@ -10,11 +10,14 @@ import { Button } from '@/components/ui/button';
 import { Card, CardDescription, CardTitle } from '@/components/ui/card';
 import { ConfirmDialog } from '@/components/ui/dialog';
 import { Field, Input, Select, Textarea } from '@/components/ui/field';
-import { SESSIONS, SUBJECT_LIST } from '@/lib/data/content';
+import { SUBJECT_LIST } from '@/lib/data/content';
+import { useContent } from '@/lib/data/content-store';
+import { SessionForm } from './session-form';
+import { TeachingView } from './teaching-view';
 import { createClient } from '@/lib/supabase/client';
 import { formatDate } from '@/lib/utils';
 
-type Tab = 'sessions' | 'questions' | 'papers' | 'students';
+type Tab = 'sessions' | 'students' | 'questions' | 'papers';
 
 export function AdminView({ connected }: { connected: boolean }) {
   const [tab, setTab] = React.useState<Tab>('sessions');
@@ -40,10 +43,10 @@ export function AdminView({ connected }: { connected: boolean }) {
       <div className="mb-5 flex flex-wrap gap-2" role="tablist" aria-label="Admin sections">
         {(
           [
-            ['sessions', 'Sessions'],
+            ['sessions', 'The plan'],
+            ['students', 'Her progress'],
             ['questions', 'Question bank'],
             ['papers', 'Papers'],
-            ['students', 'Progress'],
           ] as [Tab, string][]
         ).map(([id, label]) => (
           <Button
@@ -62,50 +65,73 @@ export function AdminView({ connected }: { connected: boolean }) {
       {tab === 'sessions' ? <SessionsAdmin connected={connected} /> : null}
       {tab === 'questions' ? <QuestionAdmin connected={connected} /> : null}
       {tab === 'papers' ? <PapersAdmin connected={connected} /> : null}
-      {tab === 'students' ? <StudentsAdmin connected={connected} /> : null}
+      {tab === 'students' ? <TeachingView connected={connected} /> : null}
     </div>
   );
 }
 
 function SessionsAdmin({ connected }: { connected: boolean }) {
-  const [query, setQuery] = React.useState('');
-  const sessions = SESSIONS.filter(
-    (s) => !query || s.title.toLowerCase().includes(query.toLowerCase()) || String(s.number) === query,
-  ).slice(0, 40);
+  const { sessions, fromDatabase, refresh, loading } = useContent();
+  const [adding, setAdding] = React.useState(false);
+  const nextNumber = sessions.reduce((max, s) => Math.max(max, s.number), 0) + 1;
 
   return (
     <div className="space-y-3">
-      <Input
-        placeholder="Find a day"
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        aria-label="Find a day"
-      />
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm text-[var(--text-muted)]">
+          {fromDatabase
+            ? `${sessions.length} day${sessions.length === 1 ? '' : 's'} in the plan.`
+            : 'Showing the two starter days built into the app. Anything you add here replaces them.'}
+        </p>
+        <Button size="sm" onClick={() => setAdding((a) => !a)} disabled={!connected}>
+          <Plus className="h-4 w-4" /> Add a day
+        </Button>
+      </div>
+
+      {adding ? (
+        <SessionForm
+          nextNumber={nextNumber}
+          onCancel={() => setAdding(false)}
+          onSaved={async () => {
+            setAdding(false);
+            await refresh();
+          }}
+        />
+      ) : null}
+
+      {loading ? <Card>Loading…</Card> : null}
+
       {sessions.map((session) => (
         <Card key={session.id} className="space-y-2">
           <div className="flex flex-wrap items-center gap-2">
             <Badge tone="neutral">Day {session.number}</Badge>
             <span className="text-xs text-[var(--text-muted)]">{formatDate(session.date)}</span>
-            <Badge tone="accent">{session.phase}</Badge>
             <div className="ml-auto flex gap-1">
-              <Button variant="ghost" size="sm" disabled={!connected} aria-label={`Edit day ${session.number}`}>
-                <Pencil className="h-4 w-4" />
-              </Button>
               <ConfirmDialog
                 trigger={
-                  <Button variant="ghost" size="sm" disabled={!connected} aria-label={`Delete day ${session.number}`}>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={!connected || !fromDatabase}
+                    aria-label={`Delete day ${session.number}`}
+                  >
                     <Trash2 className="h-4 w-4" />
                   </Button>
                 }
                 title={`Delete day ${session.number}?`}
-                description="Her progress on this day will be removed with it."
+                description="The day and everything on it goes, including what she has already ticked on it."
                 confirmLabel="Delete"
                 destructive
                 onConfirm={async () => {
                   const supabase = createClient();
                   if (!supabase) return;
-                  const { error } = await supabase.from('sessions').delete().eq('session_number', session.number);
-                  toast[error ? 'error' : 'success'](error ? error.message : 'Deleted');
+                  const { error } = await supabase.from('sessions').delete().eq('id', session.id);
+                  if (error) {
+                    toast.error(error.message);
+                    return;
+                  }
+                  toast.success('Deleted');
+                  await refresh();
                 }}
               />
             </div>
@@ -349,63 +375,5 @@ function PapersAdmin({ connected }: { connected: boolean }) {
         </Button>
       </form>
     </Card>
-  );
-}
-
-function StudentsAdmin({ connected }: { connected: boolean }) {
-  const [rows, setRows] = React.useState<{ id: string; name: string; done: number; attempts: number }[]>([]);
-  const [loading, setLoading] = React.useState(connected);
-
-  React.useEffect(() => {
-    if (!connected) return;
-    const supabase = createClient();
-    if (!supabase) return;
-    (async () => {
-      const { data: profiles } = await supabase.from('profiles').select('id, display_name').eq('role', 'student');
-      const result = await Promise.all(
-        (profiles ?? []).map(async (p) => {
-          const [done, attempts] = await Promise.all([
-            supabase
-              .from('checklist_progress')
-              .select('id', { count: 'exact', head: true })
-              .eq('user_id', p.id)
-              .eq('is_complete', true),
-            supabase.from('quiz_attempts').select('id', { count: 'exact', head: true }).eq('user_id', p.id),
-          ]);
-          return { id: p.id, name: p.display_name, done: done.count ?? 0, attempts: attempts.count ?? 0 };
-        }),
-      );
-      setRows(result);
-      setLoading(false);
-    })();
-  }, [connected]);
-
-  if (!connected) {
-    return (
-      <Card>
-        <CardDescription>Connect the database to see her progress here.</CardDescription>
-      </Card>
-    );
-  }
-
-  if (loading) return <Card>Loading…</Card>;
-
-  return (
-    <div className="space-y-3">
-      {rows.map((row) => (
-        <Card key={row.id} className="flex items-center justify-between gap-3">
-          <p className="font-medium">{row.name}</p>
-          <div className="flex gap-2">
-            <Badge tone="neutral">{row.done} tasks done</Badge>
-            <Badge tone="neutral">{row.attempts} quiz attempts</Badge>
-          </div>
-        </Card>
-      ))}
-      {rows.length === 0 ? (
-        <Card>
-          <CardDescription>No student accounts yet.</CardDescription>
-        </Card>
-      ) : null}
-    </div>
   );
 }

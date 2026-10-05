@@ -9,23 +9,25 @@ import { Card, CardTitle } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
 import { ProgressBar, ProgressRing } from '@/components/ui/progress';
 import { Skeleton } from '@/components/ui/skeleton';
+import { useContent } from '@/lib/data/content-store';
 import { useProgress } from '@/lib/data/progress-store';
 import { completedSessions, overallProgress, pacing, streak, subjectProgress, weakAreas } from '@/lib/data/stats';
 import { formatMinutes } from '@/lib/utils';
 
 export function ProgressView() {
   const { state, ready } = useProgress();
+  const { sessions, loading } = useContent();
   const v = React.useMemo(() => ({ mathsLevel: state.profile.mathsLevel }), [state.profile.mathsLevel]);
 
-  const overall = React.useMemo(() => overallProgress(state, v), [state, v]);
-  const subjects = React.useMemo(() => subjectProgress(state, v), [state, v]);
-  const weak = React.useMemo(() => weakAreas(state), [state]);
-  const pace = React.useMemo(() => pacing(state, v), [state, v]);
-  const done = React.useMemo(() => completedSessions(state, v), [state, v]);
+  const overall = React.useMemo(() => overallProgress(sessions, state, v), [sessions, state, v]);
+  const subjects = React.useMemo(() => subjectProgress(sessions, state, v), [sessions, state, v]);
+  const weak = React.useMemo(() => weakAreas(sessions, state), [sessions, state]);
+  const pace = React.useMemo(() => pacing(sessions, state, v), [sessions, state, v]);
+  const done = React.useMemo(() => completedSessions(sessions, state, v), [sessions, state, v]);
   const streaks = React.useMemo(() => streak(state), [state]);
   const totalMinutes = Object.values(state.minutes).reduce((sum, m) => sum + m, 0);
 
-  if (!ready) return <Skeleton className="h-64 w-full" />;
+  if (!ready || loading) return <Skeleton className="h-64 w-full" />;
 
   return (
     <div className="space-y-6">

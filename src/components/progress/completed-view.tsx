@@ -9,14 +9,16 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
+import { useContent } from '@/lib/data/content-store';
 import { useProgress } from '@/lib/data/progress-store';
 import { completedSessions } from '@/lib/data/stats';
 import { formatDate, pct } from '@/lib/utils';
 
 export function CompletedView() {
   const { state } = useProgress();
+  const { sessions } = useContent();
   const v = React.useMemo(() => ({ mathsLevel: state.profile.mathsLevel }), [state.profile.mathsLevel]);
-  const done = React.useMemo(() => completedSessions(state, v), [state, v]);
+  const done = React.useMemo(() => completedSessions(sessions, state, v), [sessions, state, v]);
 
   return (
     <div>

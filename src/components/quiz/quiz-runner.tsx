@@ -8,8 +8,11 @@ import { SubjectPill } from '@/components/sessions/subject-pill';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
+import { EmptyState } from '@/components/ui/empty-state';
+import { Skeleton } from '@/components/ui/skeleton';
 import { ProgressBar } from '@/components/ui/progress';
-import { findQuiz, type Question } from '@/lib/data/content';
+import { type Question } from '@/lib/data/content';
+import { findQuizIn, useContent } from '@/lib/data/content-store';
 import { useProgress } from '@/lib/data/progress-store';
 import { RULES } from '@/lib/data/rules';
 import { cn, pct, todayIso } from '@/lib/utils';
@@ -23,13 +26,31 @@ const TYPE_LABEL: Record<string, string> = {
 };
 
 export function QuizRunner({ quizId }: { quizId: string }) {
-  const entry = findQuiz(quizId)!;
-  const { quiz, block, session } = entry;
+  const { sessions, loading } = useContent();
   const { state, recordAttempt, addMistake } = useProgress();
+  const entry = findQuizIn(sessions, quizId);
 
   const [phase, setPhase] = React.useState<Phase>('answering');
   const [index, setIndex] = React.useState(0);
   const [answers, setAnswers] = React.useState<Record<string, number>>({});
+
+  if (loading) return <Skeleton className="h-64 w-full" />;
+
+  if (!entry) {
+    return (
+      <EmptyState
+        title="That quiz is not here"
+        description="It may have been removed. The quizzes page has everything that is available."
+        action={
+          <Button asChild size="sm">
+            <Link href="/quizzes">All quizzes</Link>
+          </Button>
+        }
+      />
+    );
+  }
+
+  const { quiz, block, session } = entry;
 
   const question = quiz.questions[index];
   const answered = Object.keys(answers).length;

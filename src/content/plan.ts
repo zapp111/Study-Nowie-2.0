@@ -20,6 +20,18 @@
 import { templateFor, type ChecklistTemplateItem, type StudyMode } from './checklists';
 import { SUBJECTS, type ChapterSeed, type SubjectSeed } from './subjects';
 
+/**
+ * How many days to build into the app itself.
+ *
+ * Sessions are added as you go, from the admin panel, straight into the
+ * database. What is bundled here is only a small starter set so the app has
+ * something to show before anything has been added — and so the whole thing
+ * still works if the database is ever unreachable.
+ *
+ * Set this to `null` to generate the full plan through to the last paper.
+ */
+export const BUNDLED_DAYS: number | null = 2;
+
 export const PLAN_START = '2025-10-05';
 export const EXAM_START = '2026-02-17';
 export const EXAM_END = '2026-03-07';
@@ -371,4 +383,8 @@ function summaryFor(phase: Phase, weekend: boolean, blocks: PlannedBlock[]): str
   return `About ${hours} hours. Consolidate — no new material this close in.`;
 }
 
-export const PLAN = buildPlan();
+function limit(sessions: PlannedSession[]): PlannedSession[] {
+  return BUNDLED_DAYS == null ? sessions : sessions.slice(0, BUNDLED_DAYS);
+}
+
+export const PLAN = limit(buildPlan());

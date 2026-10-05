@@ -253,6 +253,14 @@ npm run typecheck  # tsc --noEmit
 npm run seed:sql   # regenerate supabase/seed/0001_content.sql from src/content
 ```
 
+### The plan is added as you go
+
+Only two starter days are built into the app. Everything after that is added from the admin panel, straight into the
+database, so the plan can follow what she actually covered rather than a schedule written in October.
+
+`BUNDLED_DAYS` in `src/content/plan.ts` controls how many days are generated into the bundle. Set it to `null` and
+the full generated plan through to the last paper comes back.
+
 ### Where the content lives
 
 The plan is not a pile of hand-written rows. It is generated from three files, which are the single source of truth

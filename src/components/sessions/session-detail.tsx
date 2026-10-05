@@ -19,8 +19,11 @@ import { SubjectPill } from './subject-pill';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
+import { EmptyState } from '@/components/ui/empty-state';
+import { Skeleton } from '@/components/ui/skeleton';
 import { ProgressBar } from '@/components/ui/progress';
-import { getSession, getSessionByNumber, type Resource, type SubjectBlock } from '@/lib/data/content';
+import { type Resource, type SubjectBlock } from '@/lib/data/content';
+import { findSession, useContent } from '@/lib/data/content-store';
 import { useProgress } from '@/lib/data/progress-store';
 import { blockProgress, sessionProgress, visibleChecklist } from '@/lib/data/stats';
 import { cn, formatLongDate, formatMinutes } from '@/lib/utils';
@@ -33,14 +36,32 @@ const RESOURCE_ICONS = {
   other: Link2,
 } as const;
 
-export function SessionDetail({ sessionId }: { sessionId: string }) {
+export function SessionDetail({ sessionNumber }: { sessionNumber: number }) {
   const { state, toggleChecklist } = useProgress();
-  const session = getSession(sessionId)!;
+  const { sessions, loading } = useContent();
   const v = React.useMemo(() => ({ mathsLevel: state.profile.mathsLevel }), [state.profile.mathsLevel]);
-  const progress = sessionProgress(session, state, v);
 
-  const previous = getSessionByNumber(session.number - 1);
-  const next = getSessionByNumber(session.number + 1);
+  const session = findSession(sessions, sessionNumber);
+
+  if (loading) return <Skeleton className="h-64 w-full" />;
+
+  if (!session) {
+    return (
+      <EmptyState
+        title="That day is not in the plan"
+        description="It may not have been added yet. Everything that has been is on the study plan page."
+        action={
+          <Button asChild size="sm">
+            <Link href="/sessions">Open the plan</Link>
+          </Button>
+        }
+      />
+    );
+  }
+
+  const progress = sessionProgress(session, state, v);
+  const previous = findSession(sessions, session.number - 1);
+  const next = findSession(sessions, session.number + 1);
 
   return (
     <div className="space-y-6">

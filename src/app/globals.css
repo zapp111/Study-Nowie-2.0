@@ -182,3 +182,9 @@
     animation: none;
   }
 }
+
+/* Edge and IE draw their own reveal icon, which would sit next to ours. */
+input::-ms-reveal,
+input::-ms-clear {
+  display: none;
+}

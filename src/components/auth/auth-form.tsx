@@ -145,13 +145,15 @@ export function AuthForm({ mode }: { mode: 'signin' | 'signup' }) {
           </Field>
 
           <Field label="Password" htmlFor="password">
-            <div className="relative">
+            {/* The toggle sits beside the input rather than on top of it, so a long
+                password can never run underneath the icon. */}
+            <div className="flex items-stretch overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)] transition-colors focus-within:border-[var(--accent)]">
               <Input
                 id="password"
                 type={reveal ? 'text' : 'password'}
                 required
                 minLength={6}
-                className="pr-11"
+                className="min-w-0 flex-1 rounded-none border-0 bg-transparent focus:border-0"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 autoComplete={signup ? 'new-password' : 'current-password'}
@@ -161,7 +163,7 @@ export function AuthForm({ mode }: { mode: 'signin' | 'signup' }) {
                 onClick={() => setReveal((v) => !v)}
                 aria-label={reveal ? 'Hide password' : 'Show password'}
                 aria-pressed={reveal}
-                className="absolute inset-y-0 right-0 flex w-11 items-center justify-center rounded-r-xl text-[var(--text-muted)] transition-colors hover:text-[var(--accent)]"
+                className="flex w-11 shrink-0 items-center justify-center border-l border-[var(--border)] text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-muted)] hover:text-[var(--accent)]"
               >
                 {reveal ? (
                   <EyeOff className="h-4 w-4" aria-hidden="true" />

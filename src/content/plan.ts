@@ -30,7 +30,8 @@ import { SUBJECTS, type ChapterSeed, type SubjectSeed } from './subjects';
  *
  * Set this to `null` to generate the full plan through to the last paper.
  */
-export const BUNDLED_DAYS: number | null = 2;
+// The old starter schedule has been cleared. New days can be added deliberately later.
+export const BUNDLED_DAYS: number | null = 0;
 
 export const PLAN_START = '2025-10-05';
 export const EXAM_START = '2026-02-17';
@@ -76,7 +77,7 @@ export const DATESHEET: { slug: string; date: string; paper: string }[] = [
   { slug: 'maths', date: '2026-02-17', paper: 'Mathematics' },
   { slug: 'english', date: '2026-02-21', paper: 'English' },
   { slug: 'science', date: '2026-02-25', paper: 'Science' },
-  { slug: 'hindi', date: '2026-03-02', paper: 'Hindi' },
+  { slug: 'hindi', date: '2026-03-02', paper: 'Hindi A' },
   { slug: 'social-science', date: '2026-03-07', paper: 'Social Science' },
 ];
 

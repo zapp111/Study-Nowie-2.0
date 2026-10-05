@@ -21,7 +21,7 @@ import { useContent } from '@/lib/data/content-store';
 import { createClient } from '@/lib/supabase/client';
 import { formatDate, formatMinutes, pct } from '@/lib/utils';
 
-type StudentRow = { id: string; name: string };
+type StudentRow = { id: string; name: string; role: string };
 
 type Snapshot = {
   completedItemIds: Set<string>;
@@ -47,16 +47,23 @@ export function TeachingView({ connected }: { connected: boolean }) {
     void (async () => {
       const { data, error: queryError } = await supabase
         .from('profiles')
-        .select('id, display_name')
+        .select('id, display_name, role')
         .order('created_at');
       if (queryError) {
         setError(queryError.message);
         setLoading(false);
         return;
       }
-      const rows = (data ?? []).map((p) => ({ id: p.id, name: p.display_name as string }));
+      const rows = (data ?? []).map((p) => ({
+        id: p.id,
+        name: p.display_name as string,
+        role: p.role as string,
+      }));
       setStudents(rows);
-      setSelected((current) => current ?? rows[0]?.id ?? null);
+      // Default to her account, not whoever happened to sign up first. This
+      // tab is about her; an admin looking at their own numbers picks it
+      // deliberately.
+      setSelected((current) => current ?? rows.find((r) => r.role === 'student')?.id ?? rows[0]?.id ?? null);
       setLoading(false);
     })();
   }, [connected]);
@@ -79,6 +86,16 @@ export function TeachingView({ connected }: { connected: boolean }) {
         supabase.from('study_log').select('logged_on, minutes').eq('user_id', selected),
         supabase.from('mistakes').select('question, reattempt_on, resolved_at').eq('user_id', selected),
       ]);
+
+      // An empty list and a failed query are very different things. Never show
+      // zeros when the database actually said no.
+      const failed = checklist.error ?? attempts.error ?? chapters.error ?? log.error ?? mistakes.error ?? null;
+      if (failed) {
+        setError(failed.message);
+        setLoading(false);
+        return;
+      }
+      setError(null);
 
       setSnapshot({
         completedItemIds: new Set((checklist.data ?? []).map((r) => r.checklist_item_id as string)),
@@ -184,8 +201,16 @@ export function TeachingView({ connected }: { connected: boolean }) {
       return { ...attempt, chapter: match?.chapterName ?? 'Quiz', shortName: match?.shortName ?? '' };
     });
 
+  const viewing = students.find((s) => s.id === selected);
+
   return (
     <div className="space-y-5">
+      {viewing ? (
+        <p className="text-sm text-[var(--text-muted)]">
+          Showing <span className="font-medium text-[var(--text)]">{viewing.name}</span>
+          {viewing.role === 'admin' ? ' — this is an admin account, not hers' : null}
+        </p>
+      ) : null}
       {students.length > 1 ? (
         <div className="flex flex-wrap gap-2">
           {students.map((student) => (

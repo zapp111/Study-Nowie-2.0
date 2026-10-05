@@ -52,27 +52,29 @@ export function QuizzesView() {
         description="Written like the real paper — a mix of recall, applied questions, assertion-reason and case studies."
       />
 
-      <div className="mb-5 flex flex-wrap gap-2" role="group" aria-label="Filter by subject">
-        <Button variant={subject === 'all' ? 'soft' : 'outline'} size="sm" onClick={() => setSubject('all')}>
-          All
-        </Button>
-        {SUBJECT_LIST.map((s) => (
-          <Button
-            key={s.slug}
-            variant={subject === s.slug ? 'soft' : 'outline'}
-            size="sm"
-            onClick={() => setSubject(s.slug)}
-          >
-            {s.shortName}
+      {entries.length > 0 ? (
+        <div className="mb-5 flex flex-wrap gap-2" role="group" aria-label="Filter by subject">
+          <Button variant={subject === 'all' ? 'soft' : 'outline'} size="sm" onClick={() => setSubject('all')}>
+            All
           </Button>
-        ))}
-      </div>
+          {SUBJECT_LIST.map((s) => (
+            <Button
+              key={s.slug}
+              variant={subject === s.slug ? 'soft' : 'outline'}
+              size="sm"
+              onClick={() => setSubject(s.slug)}
+            >
+              {s.shortName}
+            </Button>
+          ))}
+        </div>
+      ) : null}
 
       {entries.length === 0 ? (
         <EmptyState
           icon={BookOpen}
-          title="No quizzes here yet"
-          description="Quizzes are added chapter by chapter. Pick another subject, or carry on with the plan."
+          title="No quizzes"
+          description="The quiz bank has been cleared. New quizzes can be added when the study plan is ready."
         />
       ) : (
         <ul className="grid gap-3 sm:grid-cols-2">

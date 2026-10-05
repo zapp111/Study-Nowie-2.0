@@ -2,7 +2,7 @@ import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
 import { SUPABASE_ANON_KEY, SUPABASE_URL, isSupabaseConfigured } from './config';
 
-const PUBLIC_PATHS = ['/login', '/signup', '/auth'];
+const PUBLIC_PATHS = ['/login', '/signup', '/auth', '/icon', '/apple-icon', '/manifest.webmanifest', '/favicon.ico'];
 
 export async function updateSession(request: NextRequest) {
   let response = NextResponse.next({ request });

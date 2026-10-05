@@ -1,0 +1,722 @@
+-- Study Nowie 2.0 — complete setup
+-- Run this once in the Supabase SQL editor. It creates every table, policy,
+-- index and storage bucket, then loads the subjects, all 97 chapters and the
+-- starter days.
+
+-- ==== 0001_profiles.sql ====
+-- Study Nowie 2.0 — profiles and roles
+-- Every account is either a student or an admin. Role lives here, never in the client.
+
+create extension if not exists "pgcrypto";
+
+create type user_role as enum ('student', 'admin');
+create type maths_level as enum ('basic', 'standard');
+create type theme_preference as enum ('light', 'dark', 'system');
+
+create table public.profiles (
+  id             uuid primary key references auth.users (id) on delete cascade,
+  email          text,
+  display_name   text        not null default 'Student',
+  role           user_role   not null default 'student',
+  class_level    text        not null default '10',
+  maths_level    maths_level not null default 'basic',
+  theme          theme_preference not null default 'light',
+  exam_date      date        not null default '2026-02-17',
+  daily_goal_minutes integer not null default 150 check (daily_goal_minutes between 15 and 720),
+  onboarded      boolean     not null default false,
+  created_at     timestamptz not null default now(),
+  updated_at     timestamptz not null default now()
+);
+
+comment on table public.profiles is 'One row per account. Mirrors auth.users and carries role plus study preferences.';
+comment on column public.profiles.exam_date is 'First board paper. Drives every countdown and pacing calculation.';
+
+-- Keep updated_at honest.
+create or replace function public.touch_updated_at()
+returns trigger
+language plpgsql
+as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$;
+
+create trigger profiles_touch_updated_at
+  before update on public.profiles
+  for each row execute function public.touch_updated_at();
+
+-- A profile is created automatically whenever an account is created.
+create or replace function public.handle_new_user()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  insert into public.profiles (id, email, display_name)
+  values (
+    new.id,
+    new.email,
+    coalesce(nullif(new.raw_user_meta_data ->> 'display_name', ''), split_part(coalesce(new.email, 'student'), '@', 1))
+  )
+  on conflict (id) do nothing;
+  return new;
+end;
+$$;
+
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute function public.handle_new_user();
+
+-- Role check used by every admin policy. Security definer so it can read profiles
+-- without tripping the policies defined on profiles itself.
+create or replace function public.is_admin()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1 from public.profiles
+    where id = auth.uid() and role = 'admin'
+  );
+$$;
+
+create index profiles_role_idx on public.profiles (role);
+
+
+-- ==== 0002_curriculum.sql ====
+-- Study Nowie 2.0 — curriculum
+-- Subjects, the chapter master (with board weightage), and the day-by-day session plan.
+
+create type study_phase as enum ('foundation', 'syllabus', 'revision', 'sprint');
+create type resource_kind as enum ('youtube', 'ncert_pdf', 'notes', 'extra_questions', 'other');
+create type cbq_frequency as enum ('low', 'medium', 'high', 'very_high');
+
+-- The five papers.
+create table public.subjects (
+  id              uuid primary key default gen_random_uuid(),
+  slug            text not null unique,
+  name            text not null,
+  short_name      text not null,
+  accent          text not null default 'rose',     -- colour token used by the UI
+  paper_date      date,                             -- from the published datesheet
+  theory_marks    integer not null default 80,
+  internal_marks  integer not null default 20,
+  sort_order      integer not null default 0,
+  created_at      timestamptz not null default now()
+);
+
+comment on column public.subjects.paper_date is 'Board paper date. Drives reverse-datesheet revision ordering in February.';
+
+-- Chapter master. board_weightage is what makes the planner prioritise correctly.
+create table public.chapters (
+  id               uuid primary key default gen_random_uuid(),
+  subject_id       uuid not null references public.subjects (id) on delete cascade,
+  number           integer not null,
+  name             text not null,
+  unit             text,
+  board_weightage  integer not null default 0 check (board_weightage >= 0),
+  cbq_frequency    cbq_frequency not null default 'medium',
+  standard_only    boolean not null default false,  -- true = Maths Standard syllabus only
+  notes            text,
+  created_at       timestamptz not null default now(),
+  unique (subject_id, number)
+);
+
+comment on column public.chapters.board_weightage is 'Marks this chapter carries in the 80-mark paper.';
+comment on column public.chapters.standard_only is 'Hidden when the student is on Maths Basic.';
+
+-- A session is one day of the plan.
+create table public.sessions (
+  id              uuid primary key default gen_random_uuid(),
+  session_number  integer not null unique,
+  scheduled_date  date not null,
+  phase           study_phase not null default 'foundation',
+  title           text not null,
+  summary         text,
+  focus_topics    text[] not null default '{}',
+  requires_session integer,                          -- previous session number that gates this one
+  is_published    boolean not null default true,
+  created_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now()
+);
+
+create trigger sessions_touch_updated_at
+  before update on public.sessions
+  for each row execute function public.touch_updated_at();
+
+-- One subject block inside a session.
+create table public.session_subjects (
+  id                 uuid primary key default gen_random_uuid(),
+  session_id         uuid not null references public.sessions (id) on delete cascade,
+  subject_id         uuid not null references public.subjects (id) on delete restrict,
+  chapter_id         uuid references public.chapters (id) on delete set null,
+  chapter_name       text not null,
+  focus_topic        text not null,
+  estimated_minutes  integer not null default 50 check (estimated_minutes between 5 and 300),
+  sort_order         integer not null default 0,
+  created_at         timestamptz not null default now(),
+  unique (session_id, subject_id)
+);
+
+create table public.checklist_items (
+  id                  uuid primary key default gen_random_uuid(),
+  session_subject_id  uuid not null references public.session_subjects (id) on delete cascade,
+  label               text not null,
+  detail              text,
+  estimated_minutes   integer,
+  standard_only       boolean not null default false,
+  is_optional         boolean not null default false,
+  sort_order          integer not null default 0,
+  created_at          timestamptz not null default now()
+);
+
+-- Resources must have a real URL. No blank links reach the UI.
+create table public.resources (
+  id                  uuid primary key default gen_random_uuid(),
+  session_subject_id  uuid references public.session_subjects (id) on delete cascade,
+  chapter_id          uuid references public.chapters (id) on delete cascade,
+  kind                resource_kind not null default 'other',
+  label               text not null,
+  url                 text not null check (url ~* '^https?://'),
+  sort_order          integer not null default 0,
+  created_at          timestamptz not null default now(),
+  constraint resources_attached_to_something
+    check (session_subject_id is not null or chapter_id is not null)
+);
+
+create index chapters_subject_idx on public.chapters (subject_id, number);
+create index chapters_weightage_idx on public.chapters (board_weightage desc);
+create index sessions_date_idx on public.sessions (scheduled_date);
+create index sessions_phase_idx on public.sessions (phase);
+create index session_subjects_session_idx on public.session_subjects (session_id, sort_order);
+create index session_subjects_subject_idx on public.session_subjects (subject_id);
+create index session_subjects_chapter_idx on public.session_subjects (chapter_id);
+create index checklist_items_parent_idx on public.checklist_items (session_subject_id, sort_order);
+create index resources_session_subject_idx on public.resources (session_subject_id, sort_order);
+create index resources_chapter_idx on public.resources (chapter_id);
+
+
+-- ==== 0003_quizzes.sql ====
+-- Study Nowie 2.0 — quizzes, question bank and past papers
+-- Question shape mirrors the real 2026 paper: mark value, difficulty and question type all matter.
+
+create type question_type as enum ('mcq', 'assertion_reason', 'case_study', 'short_answer');
+create type difficulty_level as enum ('easy', 'medium', 'hard');
+create type paper_kind as enum ('previous_year', 'sample_paper', 'mock');
+
+create table public.quizzes (
+  id                  uuid primary key default gen_random_uuid(),
+  session_subject_id  uuid references public.session_subjects (id) on delete cascade,
+  subject_id          uuid references public.subjects (id) on delete set null,
+  chapter_id          uuid references public.chapters (id) on delete set null,
+  title               text not null,
+  description         text,
+  pass_percentage     integer not null default 70 check (pass_percentage between 0 and 100),
+  time_limit_minutes  integer,
+  is_published        boolean not null default true,
+  created_at          timestamptz not null default now(),
+  updated_at          timestamptz not null default now()
+);
+
+create trigger quizzes_touch_updated_at
+  before update on public.quizzes
+  for each row execute function public.touch_updated_at();
+
+-- Options are JSONB: an ordered array of strings. correct_index points into it.
+create table public.quiz_questions (
+  id              uuid primary key default gen_random_uuid(),
+  quiz_id         uuid not null references public.quizzes (id) on delete cascade,
+  prompt          text not null,
+  stimulus        text,                              -- case-study passage shown above the question
+  options         jsonb not null,
+  correct_index   integer not null check (correct_index >= 0),
+  explanation     text,
+  marks           integer not null default 1 check (marks between 1 and 5),
+  difficulty      difficulty_level not null default 'medium',
+  question_type   question_type not null default 'mcq',
+  standard_only   boolean not null default false,
+  sort_order      integer not null default 0,
+  created_at      timestamptz not null default now(),
+  constraint quiz_questions_options_is_array check (jsonb_typeof(options) = 'array'),
+  constraint quiz_questions_enough_options check (jsonb_array_length(options) between 2 and 6),
+  constraint quiz_questions_correct_index_in_range check (correct_index < jsonb_array_length(options))
+);
+
+-- One row per submitted attempt. Retakes are allowed; history is never overwritten.
+create table public.quiz_attempts (
+  id                uuid primary key default gen_random_uuid(),
+  user_id           uuid not null references public.profiles (id) on delete cascade,
+  quiz_id           uuid not null references public.quizzes (id) on delete cascade,
+  score             integer not null check (score >= 0),
+  total             integer not null check (total > 0),
+  percentage        numeric(5,2) generated always as (round((score::numeric / nullif(total, 0)) * 100, 2)) stored,
+  responses         jsonb not null default '[]'::jsonb,  -- [{questionId, selectedIndex, correct}]
+  duration_seconds  integer,
+  attempt_number    integer not null default 1,
+  created_at        timestamptz not null default now()
+);
+
+-- Standalone practice questions, filterable and independent of the session plan.
+create table public.question_bank (
+  id             uuid primary key default gen_random_uuid(),
+  subject_id     uuid not null references public.subjects (id) on delete cascade,
+  chapter_id     uuid references public.chapters (id) on delete set null,
+  prompt         text not null,
+  stimulus       text,
+  options        jsonb not null,
+  correct_index  integer not null check (correct_index >= 0),
+  explanation    text,
+  marks          integer not null default 1 check (marks between 1 and 5),
+  difficulty     difficulty_level not null default 'medium',
+  question_type  question_type not null default 'mcq',
+  standard_only  boolean not null default false,
+  tags           text[] not null default '{}',
+  created_at     timestamptz not null default now(),
+  constraint question_bank_options_is_array check (jsonb_typeof(options) = 'array'),
+  constraint question_bank_enough_options check (jsonb_array_length(options) between 2 and 6),
+  constraint question_bank_correct_index_in_range check (correct_index < jsonb_array_length(options))
+);
+
+create table public.previous_year_papers (
+  id           uuid primary key default gen_random_uuid(),
+  subject_id   uuid not null references public.subjects (id) on delete cascade,
+  year         integer not null check (year between 2010 and 2030),
+  kind         paper_kind not null default 'previous_year',
+  title        text not null,
+  paper_url    text check (paper_url is null or paper_url ~* '^https?://'),
+  storage_path text,                                  -- object key in the `papers` bucket
+  solution_url text check (solution_url is null or solution_url ~* '^https?://'),
+  max_marks    integer not null default 80,
+  duration_minutes integer not null default 180,
+  created_at   timestamptz not null default now(),
+  constraint papers_has_a_source check (paper_url is not null or storage_path is not null)
+);
+
+create index quizzes_session_subject_idx on public.quizzes (session_subject_id);
+create index quizzes_subject_idx on public.quizzes (subject_id);
+create index quizzes_chapter_idx on public.quizzes (chapter_id);
+create index quiz_questions_quiz_idx on public.quiz_questions (quiz_id, sort_order);
+create index quiz_attempts_user_idx on public.quiz_attempts (user_id, created_at desc);
+create index quiz_attempts_user_quiz_idx on public.quiz_attempts (user_id, quiz_id, created_at desc);
+create index question_bank_filter_idx on public.question_bank (subject_id, chapter_id, difficulty);
+create index question_bank_type_idx on public.question_bank (question_type);
+create index papers_subject_year_idx on public.previous_year_papers (subject_id, year desc);
+
+
+-- ==== 0004_progress.sql ====
+-- Study Nowie 2.0 — per-user progress, mistakes and marks
+-- Everything in this file is owned by a single user and locked down by RLS.
+
+create type chapter_state as enum ('not_started', 'learning', 'ncert_done', 'revised', 'tested');
+create type test_kind as enum ('chapter_test', 'sample_paper', 'mock', 'school_exam');
+
+create table public.checklist_progress (
+  id                 uuid primary key default gen_random_uuid(),
+  user_id            uuid not null references public.profiles (id) on delete cascade,
+  checklist_item_id  uuid not null references public.checklist_items (id) on delete cascade,
+  is_complete        boolean not null default false,
+  completed_at       timestamptz,
+  created_at         timestamptz not null default now(),
+  updated_at         timestamptz not null default now(),
+  unique (user_id, checklist_item_id)
+);
+
+create trigger checklist_progress_touch_updated_at
+  before update on public.checklist_progress
+  for each row execute function public.touch_updated_at();
+
+-- The syllabus tracker grid.
+create table public.chapter_progress (
+  id          uuid primary key default gen_random_uuid(),
+  user_id     uuid not null references public.profiles (id) on delete cascade,
+  chapter_id  uuid not null references public.chapters (id) on delete cascade,
+  state       chapter_state not null default 'not_started',
+  confidence  integer check (confidence between 1 and 5),
+  updated_at  timestamptz not null default now(),
+  unique (user_id, chapter_id)
+);
+
+create trigger chapter_progress_touch_updated_at
+  before update on public.chapter_progress
+  for each row execute function public.touch_updated_at();
+
+-- The mistake notebook. This is where marks are actually recovered.
+create table public.mistakes (
+  id              uuid primary key default gen_random_uuid(),
+  user_id         uuid not null references public.profiles (id) on delete cascade,
+  subject_id      uuid references public.subjects (id) on delete set null,
+  chapter_id      uuid references public.chapters (id) on delete set null,
+  question        text not null,
+  what_went_wrong text,
+  correct_method  text,
+  source          text,                               -- where the question came from
+  reattempt_on    date not null default (current_date + 3),
+  resolved_at     timestamptz,
+  created_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now()
+);
+
+create trigger mistakes_touch_updated_at
+  before update on public.mistakes
+  for each row execute function public.touch_updated_at();
+
+create table public.test_scores (
+  id          uuid primary key default gen_random_uuid(),
+  user_id     uuid not null references public.profiles (id) on delete cascade,
+  subject_id  uuid references public.subjects (id) on delete set null,
+  kind        test_kind not null default 'chapter_test',
+  title       text not null,
+  score       numeric(6,2) not null check (score >= 0),
+  max_score   numeric(6,2) not null check (max_score > 0),
+  percentage  numeric(5,2) generated always as (round((score / nullif(max_score, 0)) * 100, 2)) stored,
+  taken_on    date not null default current_date,
+  notes       text,
+  created_at  timestamptz not null default now()
+);
+
+-- One row per day studied. Powers the streak and the daily minutes ring.
+create table public.study_log (
+  id          uuid primary key default gen_random_uuid(),
+  user_id     uuid not null references public.profiles (id) on delete cascade,
+  logged_on   date not null default current_date,
+  minutes     integer not null default 0 check (minutes >= 0),
+  updated_at  timestamptz not null default now(),
+  unique (user_id, logged_on)
+);
+
+create trigger study_log_touch_updated_at
+  before update on public.study_log
+  for each row execute function public.touch_updated_at();
+
+create index checklist_progress_user_idx on public.checklist_progress (user_id, is_complete);
+create index checklist_progress_item_idx on public.checklist_progress (checklist_item_id);
+create index chapter_progress_user_idx on public.chapter_progress (user_id, state);
+create index mistakes_user_due_idx on public.mistakes (user_id, reattempt_on) where resolved_at is null;
+create index mistakes_user_subject_idx on public.mistakes (user_id, subject_id);
+create index test_scores_user_idx on public.test_scores (user_id, taken_on desc);
+create index study_log_user_idx on public.study_log (user_id, logged_on desc);
+
+
+-- ==== 0005_rls.sql ====
+-- Study Nowie 2.0 — row level security
+--
+-- Two shapes of rule:
+--   Curriculum tables  : any signed-in user may read; only admins may write.
+--   Personal tables    : a user may only ever touch their own rows; admins may read
+--                        them too, so progress can be reviewed from the admin panel.
+
+alter table public.profiles             enable row level security;
+alter table public.subjects             enable row level security;
+alter table public.chapters             enable row level security;
+alter table public.sessions             enable row level security;
+alter table public.session_subjects     enable row level security;
+alter table public.checklist_items      enable row level security;
+alter table public.resources            enable row level security;
+alter table public.quizzes              enable row level security;
+alter table public.quiz_questions       enable row level security;
+alter table public.quiz_attempts        enable row level security;
+alter table public.question_bank        enable row level security;
+alter table public.previous_year_papers enable row level security;
+alter table public.checklist_progress   enable row level security;
+alter table public.chapter_progress     enable row level security;
+alter table public.mistakes             enable row level security;
+alter table public.test_scores          enable row level security;
+alter table public.study_log            enable row level security;
+
+-- ---------------------------------------------------------------- profiles
+create policy "read own profile" on public.profiles
+  for select to authenticated using (id = auth.uid() or public.is_admin());
+
+create policy "update own profile" on public.profiles
+  for update to authenticated using (id = auth.uid()) with check (id = auth.uid());
+
+create policy "admins update any profile" on public.profiles
+  for update to authenticated using (public.is_admin()) with check (public.is_admin());
+
+-- Role escalation guard: a student cannot promote themselves to admin.
+create or replace function public.prevent_role_escalation()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if new.role is distinct from old.role and not public.is_admin() then
+    raise exception 'Only an admin can change a role';
+  end if;
+  return new;
+end;
+$$;
+
+create trigger profiles_prevent_role_escalation
+  before update on public.profiles
+  for each row execute function public.prevent_role_escalation();
+
+-- ------------------------------------------------------------- curriculum
+-- Readable by anyone signed in, writable only by admins.
+do $$
+declare t text;
+begin
+  foreach t in array array[
+    'subjects', 'chapters', 'sessions', 'session_subjects',
+    'checklist_items', 'resources', 'quizzes', 'quiz_questions',
+    'question_bank', 'previous_year_papers'
+  ]
+  loop
+    execute format(
+      'create policy "read %1$s" on public.%1$I for select to authenticated using (true)', t
+    );
+    execute format(
+      'create policy "admins manage %1$s" on public.%1$I for all to authenticated
+         using (public.is_admin()) with check (public.is_admin())', t
+    );
+  end loop;
+end
+$$;
+
+-- --------------------------------------------------------------- personal
+do $$
+declare t text;
+begin
+  foreach t in array array[
+    'quiz_attempts', 'checklist_progress', 'chapter_progress',
+    'mistakes', 'test_scores', 'study_log'
+  ]
+  loop
+    execute format(
+      'create policy "read own %1$s" on public.%1$I for select to authenticated
+         using (user_id = auth.uid() or public.is_admin())', t
+    );
+    execute format(
+      'create policy "insert own %1$s" on public.%1$I for insert to authenticated
+         with check (user_id = auth.uid())', t
+    );
+    execute format(
+      'create policy "update own %1$s" on public.%1$I for update to authenticated
+         using (user_id = auth.uid()) with check (user_id = auth.uid())', t
+    );
+    execute format(
+      'create policy "delete own %1$s" on public.%1$I for delete to authenticated
+         using (user_id = auth.uid())', t
+    );
+  end loop;
+end
+$$;
+
+
+-- ==== 0006_storage.sql ====
+-- Study Nowie 2.0 — storage for question papers
+-- Private bucket: signed-in users can read, only admins can upload or delete.
+
+insert into storage.buckets (id, name, public)
+values ('papers', 'papers', false)
+on conflict (id) do nothing;
+
+create policy "signed in users read papers"
+  on storage.objects for select to authenticated
+  using (bucket_id = 'papers');
+
+create policy "admins upload papers"
+  on storage.objects for insert to authenticated
+  with check (bucket_id = 'papers' and public.is_admin());
+
+create policy "admins update papers"
+  on storage.objects for update to authenticated
+  using (bucket_id = 'papers' and public.is_admin())
+  with check (bucket_id = 'papers' and public.is_admin());
+
+create policy "admins delete papers"
+  on storage.objects for delete to authenticated
+  using (bucket_id = 'papers' and public.is_admin());
+
+
+-- ==== seed ====
+-- Study Nowie 2.0 — seed content
+-- Generated from src/content by `npm run seed:sql`. Safe to run more than once.
+
+begin;
+
+-- Subjects and the chapter master, with board weightage.
+insert into public.subjects (id, slug, name, short_name, accent, paper_date, sort_order) values ('9d8d5c4d-3c0e-5b0c-b895-3a70710ff2e4', 'maths', 'Mathematics', 'Maths', 'rose', '2026-02-17', 1) on conflict (id) do update set name = excluded.name, paper_date = excluded.paper_date;
+insert into public.subjects (id, slug, name, short_name, accent, paper_date, sort_order) values ('aaa03cf0-2450-5e71-bea2-63ffca71d26d', 'science', 'Science', 'Science', 'emerald', '2026-02-25', 2) on conflict (id) do update set name = excluded.name, paper_date = excluded.paper_date;
+insert into public.subjects (id, slug, name, short_name, accent, paper_date, sort_order) values ('4e91d7c3-6d76-5229-b8bd-6857078383c3', 'social-science', 'Social Science', 'SSt', 'amber', '2026-03-07', 3) on conflict (id) do update set name = excluded.name, paper_date = excluded.paper_date;
+insert into public.subjects (id, slug, name, short_name, accent, paper_date, sort_order) values ('07df4f0d-abba-593f-a724-cbb0b95bafa0', 'english', 'English (Language & Literature)', 'English', 'sky', '2026-02-21', 4) on conflict (id) do update set name = excluded.name, paper_date = excluded.paper_date;
+insert into public.subjects (id, slug, name, short_name, accent, paper_date, sort_order) values ('6ccda25c-d4bb-5634-9e3a-c7cb8e50bb85', 'hindi', 'हिंदी (Course A)', 'Hindi', 'violet', '2026-03-02', 5) on conflict (id) do update set name = excluded.name, paper_date = excluded.paper_date;
+
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('48b9999f-0a40-556e-95d6-5166881de186', '9d8d5c4d-3c0e-5b0c-b895-3a70710ff2e4', 1, 'Real Numbers', 'Number Systems', 6, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('772b51b8-fc58-5074-b438-d056e477db2a', '9d8d5c4d-3c0e-5b0c-b895-3a70710ff2e4', 2, 'Polynomials', 'Algebra', 4, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('e353e402-7a8b-5e32-a4fb-f4e040a17347', '9d8d5c4d-3c0e-5b0c-b895-3a70710ff2e4', 3, 'Pair of Linear Equations in Two Variables', 'Algebra', 6, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('3600cb06-10b0-5bd7-847f-f1f8b19a20ae', '9d8d5c4d-3c0e-5b0c-b895-3a70710ff2e4', 4, 'Quadratic Equations', 'Algebra', 6, 'high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('9bf9c4c2-55f9-55a6-9557-125a841a150d', '9d8d5c4d-3c0e-5b0c-b895-3a70710ff2e4', 5, 'Arithmetic Progressions', 'Algebra', 4, 'very_high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('53aeef51-ef97-5aa2-8a25-2ccd53cc46e0', '9d8d5c4d-3c0e-5b0c-b895-3a70710ff2e4', 6, 'Triangles', 'Geometry', 8, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('a907752b-0ba4-5d94-94ff-3e15372c5e8b', '9d8d5c4d-3c0e-5b0c-b895-3a70710ff2e4', 7, 'Coordinate Geometry', 'Coordinate Geometry', 6, 'high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('e6e49e95-e490-5582-a489-cda2d98c9134', '9d8d5c4d-3c0e-5b0c-b895-3a70710ff2e4', 8, 'Introduction to Trigonometry', 'Trigonometry', 8, 'high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('4e7f64f0-4293-5c99-b925-7dd095b7a7c7', '9d8d5c4d-3c0e-5b0c-b895-3a70710ff2e4', 9, 'Some Applications of Trigonometry', 'Trigonometry', 4, 'very_high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('f80fc330-a0ad-5ebb-9fb3-70daf01002c3', '9d8d5c4d-3c0e-5b0c-b895-3a70710ff2e4', 10, 'Circles', 'Geometry', 7, 'low', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('73ef8a67-878c-5ea4-820e-cc160eda2082', '9d8d5c4d-3c0e-5b0c-b895-3a70710ff2e4', 11, 'Areas Related to Circles', 'Mensuration', 3, 'high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('f13a2566-b3da-534a-a0b5-c53216a7cec5', '9d8d5c4d-3c0e-5b0c-b895-3a70710ff2e4', 12, 'Surface Areas and Volumes', 'Mensuration', 7, 'very_high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('b516850f-a31e-5af0-bdb4-849a6ca0603a', '9d8d5c4d-3c0e-5b0c-b895-3a70710ff2e4', 13, 'Statistics', 'Statistics & Probability', 7, 'very_high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('58140600-7425-5568-a734-ddb5d15cd8c3', '9d8d5c4d-3c0e-5b0c-b895-3a70710ff2e4', 14, 'Probability', 'Statistics & Probability', 4, 'high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('5b20aa01-4e0c-5f13-a7a3-285d572a55d3', 'aaa03cf0-2450-5e71-bea2-63ffca71d26d', 1, 'Chemical Reactions and Equations', 'Chemical Substances', 6, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('ba7f507a-9268-5f9c-9f49-975f16823954', 'aaa03cf0-2450-5e71-bea2-63ffca71d26d', 2, 'Acids, Bases and Salts', 'Chemical Substances', 3, 'high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('0d74418b-9ec4-5a72-8b68-009f5c696703', 'aaa03cf0-2450-5e71-bea2-63ffca71d26d', 3, 'Metals and Non-metals', 'Chemical Substances', 10, 'high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('59e16b83-c018-5982-a68a-1b8dd6fcad13', 'aaa03cf0-2450-5e71-bea2-63ffca71d26d', 4, 'Carbon and its Compounds', 'Chemical Substances', 6, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('74b2db6a-ba04-52cb-a079-d69a0ee5cc78', 'aaa03cf0-2450-5e71-bea2-63ffca71d26d', 5, 'Life Processes', 'World of Living', 9, 'very_high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('285d3605-95ca-5def-9a5c-984c0f56b91b', 'aaa03cf0-2450-5e71-bea2-63ffca71d26d', 6, 'Control and Coordination', 'World of Living', 6, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('adf88013-69d3-5f4a-801a-76152a423555', 'aaa03cf0-2450-5e71-bea2-63ffca71d26d', 7, 'How do Organisms Reproduce?', 'World of Living', 3, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('46ea8020-8adc-5a04-a970-8a4085c8beac', 'aaa03cf0-2450-5e71-bea2-63ffca71d26d', 8, 'Heredity and Evolution', 'World of Living', 7, 'high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('656773ad-9362-50c0-a103-98aa010d2f40', 'aaa03cf0-2450-5e71-bea2-63ffca71d26d', 9, 'Light — Reflection and Refraction', 'Natural Phenomena', 10, 'very_high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('2957e228-67b6-54f9-98e1-85be83cf9eee', 'aaa03cf0-2450-5e71-bea2-63ffca71d26d', 10, 'The Human Eye and the Colourful World', 'Natural Phenomena', 2, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('e5f30e29-1b35-531a-ac68-3f31cb3b1947', 'aaa03cf0-2450-5e71-bea2-63ffca71d26d', 11, 'Electricity', 'Effects of Current', 7, 'very_high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('c4152acb-67ea-5a46-9378-e33d384395b7', 'aaa03cf0-2450-5e71-bea2-63ffca71d26d', 12, 'Magnetic Effects of Electric Current', 'Effects of Current', 6, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('1133445b-49ce-5b83-9f39-3db0033448cc', 'aaa03cf0-2450-5e71-bea2-63ffca71d26d', 13, 'Our Environment', 'Natural Resources', 5, 'low', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('866212fe-c1d0-5380-a102-52000b30664f', '4e91d7c3-6d76-5229-b8bd-6857078383c3', 1, 'The Rise of Nationalism in Europe', 'History', 5, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('70cf954e-8a54-520e-8071-ecd9fac65802', '4e91d7c3-6d76-5229-b8bd-6857078383c3', 2, 'Nationalism in India', 'History', 5, 'high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('820e7643-6aba-52b4-af88-fcf48a00064e', '4e91d7c3-6d76-5229-b8bd-6857078383c3', 3, 'The Making of a Global World', 'History', 4, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('fb7575ce-240f-54ec-b940-18607274eb79', '4e91d7c3-6d76-5229-b8bd-6857078383c3', 4, 'The Age of Industrialisation', 'History', 3, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('7ed7e2e1-df80-5b3e-b40b-5ae4958d385c', '4e91d7c3-6d76-5229-b8bd-6857078383c3', 5, 'Print Culture and the Modern World', 'History', 3, 'low', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('3bebbae7-cf50-5589-98de-2d413fa11bac', '4e91d7c3-6d76-5229-b8bd-6857078383c3', 6, 'Resources and Development', 'Geography', 4, 'high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('5d0c0eb0-287e-52e6-90fb-d377818f1a43', '4e91d7c3-6d76-5229-b8bd-6857078383c3', 7, 'Forest and Wildlife Resources', 'Geography', 2, 'low', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('be398348-86d6-5383-a10f-1f370c92b45b', '4e91d7c3-6d76-5229-b8bd-6857078383c3', 8, 'Water Resources', 'Geography', 3, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('f674ee9d-1808-54dc-aedd-edf3ecfdff53', '4e91d7c3-6d76-5229-b8bd-6857078383c3', 9, 'Agriculture', 'Geography', 4, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('5d81fd92-e0b9-52db-8ec3-c540d86eee0e', '4e91d7c3-6d76-5229-b8bd-6857078383c3', 10, 'Minerals and Energy Resources', 'Geography', 3, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('3e2ae50b-817b-5ada-b92e-9436d3b8db11', '4e91d7c3-6d76-5229-b8bd-6857078383c3', 11, 'Manufacturing Industries', 'Geography', 2, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('ca7a1310-a5f5-573b-9d58-9073a8f1e51c', '4e91d7c3-6d76-5229-b8bd-6857078383c3', 12, 'Lifelines of National Economy', 'Geography', 2, 'low', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('720af8b7-8b28-5306-bb71-4ebf6f5a5f03', '4e91d7c3-6d76-5229-b8bd-6857078383c3', 13, 'Power Sharing', 'Political Science', 4, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('96674982-5422-57a6-8c80-c0f1dca30465', '4e91d7c3-6d76-5229-b8bd-6857078383c3', 14, 'Federalism', 'Political Science', 4, 'high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('27226957-c113-57fe-90b0-d7c5d956448c', '4e91d7c3-6d76-5229-b8bd-6857078383c3', 15, 'Gender, Religion and Caste', 'Political Science', 4, 'high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('73f6129f-55ad-580c-9e13-324546783453', '4e91d7c3-6d76-5229-b8bd-6857078383c3', 16, 'Political Parties', 'Political Science', 4, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('ab0f3428-cae7-5f7a-b725-0e8b8a2a88fa', '4e91d7c3-6d76-5229-b8bd-6857078383c3', 17, 'Outcomes of Democracy', 'Political Science', 4, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('47bfeb70-400b-5a77-8c5f-4da1c879821f', '4e91d7c3-6d76-5229-b8bd-6857078383c3', 18, 'Development', 'Economics', 4, 'high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('db0281ff-c1c3-5ace-b7a6-839e5c8fcc55', '4e91d7c3-6d76-5229-b8bd-6857078383c3', 19, 'Sectors of the Indian Economy', 'Economics', 4, 'high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('baa613a6-cd15-5448-8f45-8905ba487ede', '4e91d7c3-6d76-5229-b8bd-6857078383c3', 20, 'Money and Credit', 'Economics', 4, 'very_high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('db78f666-d5df-5525-a1f6-872b5d5dca97', '4e91d7c3-6d76-5229-b8bd-6857078383c3', 21, 'Globalisation and the Indian Economy', 'Economics', 4, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('5c3fd076-cc18-5e15-93bd-b9acb55bbe29', '4e91d7c3-6d76-5229-b8bd-6857078383c3', 22, 'Consumer Rights', 'Economics', 4, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('6d8af7ec-7b84-5315-bd74-d6586b371543', '4e91d7c3-6d76-5229-b8bd-6857078383c3', 23, 'Map Work — History and Geography', 'Map Work', 5, 'low', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('2a54283b-4364-59f1-afbf-9d9be857f21e', '07df4f0d-abba-593f-a724-cbb0b95bafa0', 1, 'Reading — Unseen Passages', 'Reading', 20, 'very_high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('488be191-6b68-55c6-9dbd-e7da83cf4132', '07df4f0d-abba-593f-a724-cbb0b95bafa0', 2, 'Writing — Formal Letter', 'Writing & Grammar', 5, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('c78abe24-11ba-5efa-a351-1644f1390531', '07df4f0d-abba-593f-a724-cbb0b95bafa0', 3, 'Writing — Analytical Paragraph', 'Writing & Grammar', 5, 'high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('f02fb78d-2d2b-5bd7-aafc-5b93146bbc84', '07df4f0d-abba-593f-a724-cbb0b95bafa0', 4, 'Grammar — Tenses, Modals, Subject-Verb Agreement', 'Writing & Grammar', 5, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('5f5314f2-9435-557c-b6de-f15f10e28c53', '07df4f0d-abba-593f-a724-cbb0b95bafa0', 5, 'Grammar — Reported Speech, Determiners', 'Writing & Grammar', 5, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('7f1bdba0-98bf-55f9-b10a-8f6eb1048bdb', '07df4f0d-abba-593f-a724-cbb0b95bafa0', 6, 'First Flight — A Letter to God', 'Literature: Prose', 2, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('ddf9ecdc-49c8-526f-adfa-69a5dc6f435f', '07df4f0d-abba-593f-a724-cbb0b95bafa0', 7, 'First Flight — Nelson Mandela: Long Walk to Freedom', 'Literature: Prose', 2, 'high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('45a88791-873f-553e-8ef1-ef229c38e8a9', '07df4f0d-abba-593f-a724-cbb0b95bafa0', 8, 'First Flight — Two Stories About Flying', 'Literature: Prose', 2, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('9262e260-faa1-5bd7-b280-d5d7f6c1ad41', '07df4f0d-abba-593f-a724-cbb0b95bafa0', 9, 'First Flight — From the Diary of Anne Frank', 'Literature: Prose', 2, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('ba1240ed-ec67-5901-a235-2eac63b095f1', '07df4f0d-abba-593f-a724-cbb0b95bafa0', 10, 'First Flight — Glimpses of India', 'Literature: Prose', 2, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('dc66f101-8308-5e1a-800a-3ca1ec85adb5', '07df4f0d-abba-593f-a724-cbb0b95bafa0', 11, 'First Flight — Mijbil the Otter', 'Literature: Prose', 2, 'low', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('db112cd7-510b-5a06-ac16-5e5929f72add', '07df4f0d-abba-593f-a724-cbb0b95bafa0', 12, 'First Flight — Madam Rides the Bus', 'Literature: Prose', 2, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('edf7ab86-415f-5b2b-a335-e68010a176ee', '07df4f0d-abba-593f-a724-cbb0b95bafa0', 13, 'First Flight — The Sermon at Benares', 'Literature: Prose', 2, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('26fe63ad-dcbc-5ff9-a757-0f1195938be4', '07df4f0d-abba-593f-a724-cbb0b95bafa0', 14, 'First Flight — The Proposal (Drama)', 'Literature: Prose', 2, 'high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('90022701-7cda-5a18-946e-3739609032d8', '07df4f0d-abba-593f-a724-cbb0b95bafa0', 15, 'Poems — Dust of Snow, Fire and Ice', 'Literature: Poetry', 2, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('5b82af8a-83be-5989-a090-a515061137b6', '07df4f0d-abba-593f-a724-cbb0b95bafa0', 16, 'Poems — A Tiger in the Zoo, How to Tell Wild Animals', 'Literature: Poetry', 2, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('af2b74b9-fc4e-5168-8caa-d2683460e528', '07df4f0d-abba-593f-a724-cbb0b95bafa0', 17, 'Poems — The Ball Poem, Amanda!', 'Literature: Poetry', 2, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('49944424-8aa4-593f-9ddc-262c2e299a6c', '07df4f0d-abba-593f-a724-cbb0b95bafa0', 18, 'Poems — The Trees, Fog', 'Literature: Poetry', 2, 'low', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('f1487155-bec8-5bb7-b129-3380055eb88d', '07df4f0d-abba-593f-a724-cbb0b95bafa0', 19, 'Poems — The Tale of Custard the Dragon, For Anne Gregory', 'Literature: Poetry', 2, 'low', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('24dd657b-4c20-5e7f-b4c6-d04461cea225', '07df4f0d-abba-593f-a724-cbb0b95bafa0', 20, 'Footprints Without Feet — A Triumph of Surgery, The Thief’s Story', 'Literature: Supplementary', 2, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('46c81bac-6b5b-588f-a7a1-803a1d2fcc15', '07df4f0d-abba-593f-a724-cbb0b95bafa0', 21, 'Footprints Without Feet — The Midnight Visitor, A Question of Trust', 'Literature: Supplementary', 2, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('49105d23-0627-5afb-ba55-92d413a10483', '07df4f0d-abba-593f-a724-cbb0b95bafa0', 22, 'Footprints Without Feet — Footprints Without Feet, The Making of a Scientist', 'Literature: Supplementary', 2, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('be12c263-35b7-500b-9d6f-55309623b817', '07df4f0d-abba-593f-a724-cbb0b95bafa0', 23, 'Footprints Without Feet — The Necklace, Bholi', 'Literature: Supplementary', 2, 'high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('50448ce2-fb31-514c-8002-ad338c872f6e', '07df4f0d-abba-593f-a724-cbb0b95bafa0', 24, 'Footprints Without Feet — The Book That Saved the Earth', 'Literature: Supplementary', 1, 'low', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('434f8152-dce8-5b7e-b6eb-b9b0725abebf', '6ccda25c-d4bb-5634-9e3a-c7cb8e50bb85', 1, 'अपठित गद्यांश एवं काव्यांश', 'अपठित बोध', 14, 'very_high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('3a91363f-d1f1-58ce-9b5b-436dfbbbfd2e', '6ccda25c-d4bb-5634-9e3a-c7cb8e50bb85', 2, 'व्याकरण — पद परिचय, रचना के आधार पर वाक्य भेद', 'व्याकरण', 8, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('05b8c4f0-5e47-5478-81aa-111444e31adf', '6ccda25c-d4bb-5634-9e3a-c7cb8e50bb85', 3, 'व्याकरण — समास, अलंकार, मुहावरे', 'व्याकरण', 8, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('5a11fcff-0976-5642-b655-3fb7f2acbd61', '6ccda25c-d4bb-5634-9e3a-c7cb8e50bb85', 4, 'क्षितिज — सूरदास के पद', 'क्षितिज: काव्य खंड', 3, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('c3cc72f3-d904-5999-a6b4-47e6de1129e3', '6ccda25c-d4bb-5634-9e3a-c7cb8e50bb85', 5, 'क्षितिज — तुलसीदास: राम-लक्ष्मण-परशुराम संवाद', 'क्षितिज: काव्य खंड', 3, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('56b9e386-a748-5515-bfc9-6b9b8110455a', '6ccda25c-d4bb-5634-9e3a-c7cb8e50bb85', 6, 'क्षितिज — देव के सवैये और कवित्त', 'क्षितिज: काव्य खंड', 2, 'low', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('3f454432-9083-5fea-99dc-df08f89eb04b', '6ccda25c-d4bb-5634-9e3a-c7cb8e50bb85', 7, 'क्षितिज — जयशंकर प्रसाद: आत्मकथ्य', 'क्षितिज: काव्य खंड', 2, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('9031509b-3e87-599a-9b06-42ae67fb0710', '6ccda25c-d4bb-5634-9e3a-c7cb8e50bb85', 8, 'क्षितिज — सूर्यकांत त्रिपाठी निराला: उत्साह, अट नहीं रही है', 'क्षितिज: काव्य खंड', 2, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('b165cc25-841a-5ddf-b50c-7b31dd12bbc1', '6ccda25c-d4bb-5634-9e3a-c7cb8e50bb85', 9, 'क्षितिज — नागार्जुन: यह दंतुरहित मुस्कान, फसल', 'क्षितिज: काव्य खंड', 2, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('11430d87-a6b5-52f2-ab42-e6ec1cf87b9e', '6ccda25c-d4bb-5634-9e3a-c7cb8e50bb85', 10, 'क्षितिज — गिरिजाकुमार माथुर: छाया मत छूना', 'क्षितिज: काव्य खंड', 2, 'low', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('b4b0b9e6-a909-587c-9a54-eaa3bb849f6e', '6ccda25c-d4bb-5634-9e3a-c7cb8e50bb85', 11, 'क्षितिज — ऋतुराज: कन्यादान', 'क्षितिज: काव्य खंड', 2, 'high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('9597be52-73be-5964-8cf0-037b541241f4', '6ccda25c-d4bb-5634-9e3a-c7cb8e50bb85', 12, 'क्षितिज — मंगलेश डबराल: संगतकार', 'क्षितिज: काव्य खंड', 2, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('27312dfc-da81-513f-8a6e-d539b36c9c6a', '6ccda25c-d4bb-5634-9e3a-c7cb8e50bb85', 13, 'क्षितिज — नेताजी का चश्मा', 'क्षितिज: गद्य खंड', 3, 'high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('d187d28f-3dad-5f49-a5ff-2c2fd2ee4c86', '6ccda25c-d4bb-5634-9e3a-c7cb8e50bb85', 14, 'क्षितिज — बालगोबिन भगत', 'क्षितिज: गद्य खंड', 3, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('2c3810b1-0457-508f-ad6c-77a3e0af888d', '6ccda25c-d4bb-5634-9e3a-c7cb8e50bb85', 15, 'क्षितिज — लखनवी अंदाज़', 'क्षितिज: गद्य खंड', 2, 'low', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('eba101ed-2638-5f88-8c1c-cf392bff59f7', '6ccda25c-d4bb-5634-9e3a-c7cb8e50bb85', 16, 'क्षितिज — मानवीय करुणा की दिव्य चमक', 'क्षितिज: गद्य खंड', 2, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('f2bff29f-b970-5931-985e-94150681c02f', '6ccda25c-d4bb-5634-9e3a-c7cb8e50bb85', 17, 'क्षितिज — एक कहानी यह भी', 'क्षितिज: गद्य खंड', 3, 'high', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('434f4b7e-8f8e-5bb6-8210-7006aeac6c96', '6ccda25c-d4bb-5634-9e3a-c7cb8e50bb85', 18, 'क्षितिज — नौबतखाने में इबादत', 'क्षितिज: गद्य खंड', 2, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('c1db03b2-1a49-5592-a39b-4e0631a0bbba', '6ccda25c-d4bb-5634-9e3a-c7cb8e50bb85', 19, 'क्षितिज — संस्कृति', 'क्षितिज: गद्य खंड', 2, 'low', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('a3a83df6-c733-5a55-98de-1e2faa7a713a', '6ccda25c-d4bb-5634-9e3a-c7cb8e50bb85', 20, 'कृतिका — माता का आँचल', 'कृतिका', 3, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('5ca16b37-5c9d-597c-8b1c-61c70afe269b', '6ccda25c-d4bb-5634-9e3a-c7cb8e50bb85', 21, 'कृतिका — जॉर्ज पंचम की नाक', 'कृतिका', 3, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('2b038ef8-6f79-5c84-8f67-f966f941252e', '6ccda25c-d4bb-5634-9e3a-c7cb8e50bb85', 22, 'कृतिका — साना साना हाथ जोड़ि', 'कृतिका', 2, 'low', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+insert into public.chapters (id, subject_id, number, name, unit, board_weightage, cbq_frequency, standard_only) values ('cb45c637-175b-5bed-925d-6ae91dd9a787', '6ccda25c-d4bb-5634-9e3a-c7cb8e50bb85', 23, 'लेखन — अनुच्छेद, पत्र, सूचना, विज्ञापन', 'लेखन', 5, 'medium', false) on conflict (id) do update set name = excluded.name, board_weightage = excluded.board_weightage;
+
+-- The day-by-day plan.
+insert into public.sessions (id, session_number, scheduled_date, phase, title, summary, focus_topics) values ('eb3b4a9f-a02e-5486-8660-c70c93609e0b', 1, '2025-10-05', 'foundation', 'Day 1 — Real Numbers + Chemical Reactions and Equations', 'About 4.5 hours today. Weekends are where the Maths backlog actually gets cleared.', array['Maths: Real Numbers', 'Science: Chemical Reactions and Equations', 'SSt: The Rise of Nationalism in Europe', 'English: Reading — Unseen Passages']) on conflict (id) do update set title = excluded.title, summary = excluded.summary, focus_topics = excluded.focus_topics;
+insert into public.session_subjects (id, session_id, subject_id, chapter_id, chapter_name, focus_topic, estimated_minutes, sort_order) values ('5f0e6d49-dd98-5ebc-96f5-21e4df356ca3', 'eb3b4a9f-a02e-5486-8660-c70c93609e0b', '9d8d5c4d-3c0e-5b0c-b895-3a70710ff2e4', '48b9999f-0a40-556e-95d6-5166881de186', 'Real Numbers', 'Start Real Numbers — the concepts and the first half of the exercise.', 120, 0) on conflict (id) do update set focus_topic = excluded.focus_topic, estimated_minutes = excluded.estimated_minutes;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('99b03030-091f-545f-9632-145049d86007', '5f0e6d49-dd98-5ebc-96f5-21e4df356ca3', 'Read the concept from NCERT', 'Theory first, slowly. Do not skip the worked derivations.', 15, false, false, 0) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('0f6ed374-da54-5caa-958c-13858cf24105', '5f0e6d49-dd98-5ebc-96f5-21e4df356ca3', 'Solve the solved examples yourself', 'Cover the solution, try it, then compare line by line.', 20, false, false, 1) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('544ce6eb-40bd-548d-b3b4-234cd81e7ffe', '5f0e6d49-dd98-5ebc-96f5-21e4df356ca3', 'Complete the NCERT exercise', 'Every question. This is the actual paper standard for Basic.', 30, false, false, 2) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('0303b1e5-573a-5f4e-89c8-2e3f5996cd80', '5f0e6d49-dd98-5ebc-96f5-21e4df356ca3', 'Mark the questions you could not solve', 'Put them in the mistake notebook rather than leaving them blank.', 5, false, false, 3) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('a44fff67-a908-563c-8828-72e1eca67a54', '5f0e6d49-dd98-5ebc-96f5-21e4df356ca3', 'Write the formulas into your formula sheet', null, 5, false, false, 4) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('fe1cc9f2-9889-5a79-bc3d-11cedd16373e', '5f0e6d49-dd98-5ebc-96f5-21e4df356ca3', 'Extra questions', 'Only once NCERT feels comfortable.', 20, false, true, 5) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('b0e829fd-4f50-55c2-b22a-1cebb45e00db', '5f0e6d49-dd98-5ebc-96f5-21e4df356ca3', 'Higher-order application set', 'Standard paper practice.', 25, true, false, 6) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.resources (id, session_subject_id, kind, label, url, sort_order) values ('847a7c9d-bb66-54d9-b4be-5b64bb5e79f0', '5f0e6d49-dd98-5ebc-96f5-21e4df356ca3', 'ncert_pdf', 'NCERT chapter', 'https://ncert.nic.in/textbook/pdf/jemh101.pdf', 0) on conflict (id) do update set url = excluded.url;
+insert into public.quizzes (id, session_subject_id, subject_id, chapter_id, title, description) values ('46967014-a34f-567e-8389-7552747ccd06', '5f0e6d49-dd98-5ebc-96f5-21e4df356ca3', '9d8d5c4d-3c0e-5b0c-b895-3a70710ff2e4', '48b9999f-0a40-556e-95d6-5166881de186', 'Real Numbers', 'Six marks in the paper. Short, scoring, and worth getting fully right.') on conflict (id) do update set title = excluded.title;
+insert into public.quiz_questions (id, quiz_id, prompt, stimulus, options, correct_index, explanation, marks, difficulty, question_type, sort_order) values ('ccc78dbe-3e91-541a-a6cf-8e6b74b7b5fb', '46967014-a34f-567e-8389-7552747ccd06', 'The HCF of 96 and 404 is 4. What is their LCM?', null, '["9696","2424","4848","404"]'::jsonb, 0, 'HCF × LCM = product of the two numbers. 96 × 404 = 38784, and 38784 ÷ 4 = 9696. This identity only works for two numbers — do not try it with three.', 2, 'easy', 'mcq', 0) on conflict (id) do update set prompt = excluded.prompt, options = excluded.options, correct_index = excluded.correct_index, explanation = excluded.explanation;
+insert into public.quiz_questions (id, quiz_id, prompt, stimulus, options, correct_index, explanation, marks, difficulty, question_type, sort_order) values ('748aba65-5101-5c44-8096-01ab68c7b903', '46967014-a34f-567e-8389-7552747ccd06', 'The decimal expansion of 13/3125 will:', null, '["Be non-terminating repeating","Terminate","Be irrational","Not exist"]'::jsonb, 1, '3125 = 5⁵, which is of the form 2ⁿ5ᵐ. A fraction in lowest terms terminates exactly when its denominator has only 2s and 5s as prime factors.', 1, 'easy', 'mcq', 1) on conflict (id) do update set prompt = excluded.prompt, options = excluded.options, correct_index = excluded.correct_index, explanation = excluded.explanation;
+insert into public.quiz_questions (id, quiz_id, prompt, stimulus, options, correct_index, explanation, marks, difficulty, question_type, sort_order) values ('7bdb9b28-a635-5bc0-9211-2e208e364fbd', '46967014-a34f-567e-8389-7552747ccd06', 'If a number ends with the digit 0, it must be divisible by:', null, '["Only 2","Only 5","Both 2 and 5","Neither"]'::jsonb, 2, 'Ending in 0 means the number has 10 as a factor, and 10 = 2 × 5. This is the standard setup for "can 6ⁿ end in 0?" questions — 6ⁿ has no factor of 5, so it cannot.', 1, 'medium', 'mcq', 2) on conflict (id) do update set prompt = excluded.prompt, options = excluded.options, correct_index = excluded.correct_index, explanation = excluded.explanation;
+insert into public.quiz_questions (id, quiz_id, prompt, stimulus, options, correct_index, explanation, marks, difficulty, question_type, sort_order) values ('61119006-d456-51b9-a0ff-0f5993dfb952', '46967014-a34f-567e-8389-7552747ccd06', 'Assertion (A): √2 is an irrational number. Reason (R): The square root of every prime number is irrational.', null, '["Both A and R are true, and R is the correct explanation of A","Both A and R are true, but R is not the correct explanation of A","A is true but R is false","A is false but R is true"]'::jsonb, 0, 'Both statements are true, and R is exactly the general fact that makes A true. Assertion-reason items are lost by students who check only whether both are true and forget to ask whether R explains A.', 1, 'medium', 'assertion_reason', 3) on conflict (id) do update set prompt = excluded.prompt, options = excluded.options, correct_index = excluded.correct_index, explanation = excluded.explanation;
+insert into public.quiz_questions (id, quiz_id, prompt, stimulus, options, correct_index, explanation, marks, difficulty, question_type, sort_order) values ('4542b15a-5a9d-5353-974a-51e0f8564149', '46967014-a34f-567e-8389-7552747ccd06', 'Three bells ring at intervals of 9, 12 and 15 minutes. If they ring together at 8:00 a.m., when do they next ring together?', 'A temple has three bells. The first rings every 9 minutes, the second every 12 minutes and the third every 15 minutes. All three are rung together at 8:00 a.m.', '["8:45 a.m.","9:00 a.m.","11:00 a.m.","12:00 noon"]'::jsonb, 2, 'They coincide again after the LCM of the three intervals. 9 = 3², 12 = 2²×3, 15 = 3×5, so LCM = 2²×3²×5 = 180 minutes = 3 hours. 8:00 a.m. + 3 hours = 11:00 a.m. The usual trap is adding the intervals instead of taking the LCM.', 2, 'medium', 'case_study', 4) on conflict (id) do update set prompt = excluded.prompt, options = excluded.options, correct_index = excluded.correct_index, explanation = excluded.explanation;
+insert into public.session_subjects (id, session_id, subject_id, chapter_id, chapter_name, focus_topic, estimated_minutes, sort_order) values ('36a5fc3d-92b5-5b6a-9228-66d31e72c245', 'eb3b4a9f-a02e-5486-8660-c70c93609e0b', 'aaa03cf0-2450-5e71-bea2-63ffca71d26d', '5b20aa01-4e0c-5f13-a7a3-285d572a55d3', 'Chemical Reactions and Equations', 'Start Chemical Reactions and Equations — the concepts and the first half of the exercise.', 60, 1) on conflict (id) do update set focus_topic = excluded.focus_topic, estimated_minutes = excluded.estimated_minutes;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('65f1ff2c-3dc8-58bb-81a1-ac101e5c9974', '36a5fc3d-92b5-5b6a-9228-66d31e72c245', 'Watch or read the chapter explanation', null, 15, false, false, 0) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('d66e6de2-fdc5-59f4-94c6-6e1622780012', '36a5fc3d-92b5-5b6a-9228-66d31e72c245', 'Read NCERT line by line', 'Board questions come straight out of NCERT lines.', 20, false, false, 1) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('f0e1bb74-695e-5a9e-8b4a-ea2098447f3a', '36a5fc3d-92b5-5b6a-9228-66d31e72c245', 'Write definitions, laws and formulas', null, 10, false, false, 2) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('0f950af8-878d-5032-b6cf-b5bbf0c586a8', '36a5fc3d-92b5-5b6a-9228-66d31e72c245', 'Practise the labelled diagrams', 'Diagram marks are the easiest marks in the paper.', 10, false, false, 3) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('5358e9b9-0aed-55d8-acef-fa17eddd9e5e', '36a5fc3d-92b5-5b6a-9228-66d31e72c245', 'Balance the chemical equations / solve the numericals', null, 15, false, false, 4) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('5a4f1771-426a-5044-b44f-3b6afa09c42b', '36a5fc3d-92b5-5b6a-9228-66d31e72c245', 'Solve NCERT intext and exercise questions', null, 20, false, false, 5) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('a5752430-8c4a-581c-912a-319571e96dd5', '36a5fc3d-92b5-5b6a-9228-66d31e72c245', 'Make a one-page chapter summary', null, 10, false, false, 6) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.resources (id, session_subject_id, kind, label, url, sort_order) values ('13f5d0d0-4ad5-5565-a26f-cdb87399fb13', '36a5fc3d-92b5-5b6a-9228-66d31e72c245', 'ncert_pdf', 'NCERT chapter', 'https://ncert.nic.in/textbook/pdf/jesc101.pdf', 0) on conflict (id) do update set url = excluded.url;
+insert into public.quizzes (id, session_subject_id, subject_id, chapter_id, title, description) values ('4276896a-3af6-509f-aadf-74437e016503', '36a5fc3d-92b5-5b6a-9228-66d31e72c245', 'aaa03cf0-2450-5e71-bea2-63ffca71d26d', '5b20aa01-4e0c-5f13-a7a3-285d572a55d3', 'Chemical Reactions and Equations', null) on conflict (id) do update set title = excluded.title;
+insert into public.quiz_questions (id, quiz_id, prompt, stimulus, options, correct_index, explanation, marks, difficulty, question_type, sort_order) values ('f302f226-944f-5c69-a6a8-c127e2c28427', '4276896a-3af6-509f-aadf-74437e016503', 'Which of the following is a displacement reaction?', null, '["CaO + H₂O → Ca(OH)₂","Fe + CuSO₄ → FeSO₄ + Cu","2H₂O → 2H₂ + O₂","NaOH + HCl → NaCl + H₂O"]'::jsonb, 1, 'Iron is more reactive than copper, so it displaces copper from copper sulphate. The first is combination, the third decomposition, the fourth neutralisation — know all four names, they are asked directly.', 1, 'easy', 'mcq', 0) on conflict (id) do update set prompt = excluded.prompt, options = excluded.options, correct_index = excluded.correct_index, explanation = excluded.explanation;
+insert into public.quiz_questions (id, quiz_id, prompt, stimulus, options, correct_index, explanation, marks, difficulty, question_type, sort_order) values ('d6397c46-94de-5e76-bcf6-587f40551c6e', '4276896a-3af6-509f-aadf-74437e016503', 'Why is the burning of magnesium ribbon preceded by cleaning it with sandpaper?', null, '["To make it shiny for appearance","To remove the protective layer of magnesium oxide","To reduce its mass","To make it thinner so it burns faster"]'::jsonb, 1, 'Magnesium reacts with air to form a layer of MgO on its surface, which prevents burning. Removing it exposes clean metal. This is a standard 2-mark question — the words "protective layer of magnesium oxide" are the marking keywords.', 2, 'medium', 'mcq', 1) on conflict (id) do update set prompt = excluded.prompt, options = excluded.options, correct_index = excluded.correct_index, explanation = excluded.explanation;
+insert into public.quiz_questions (id, quiz_id, prompt, stimulus, options, correct_index, explanation, marks, difficulty, question_type, sort_order) values ('0ee9f5f7-2ccb-5612-8571-b0dab99b1ac6', '4276896a-3af6-509f-aadf-74437e016503', 'In the reaction 3Fe + 4H₂O → Fe₃O₄ + 4H₂, the substance being oxidised is:', null, '["Fe","H₂O","Fe₃O₄","H₂"]'::jsonb, 0, 'Iron gains oxygen, so iron is oxidised and water is the oxidising agent. Oxidation = gain of oxygen or loss of hydrogen.', 1, 'medium', 'mcq', 2) on conflict (id) do update set prompt = excluded.prompt, options = excluded.options, correct_index = excluded.correct_index, explanation = excluded.explanation;
+insert into public.quiz_questions (id, quiz_id, prompt, stimulus, options, correct_index, explanation, marks, difficulty, question_type, sort_order) values ('f6b35397-f706-5bd1-a599-ff98b3bfe95d', '4276896a-3af6-509f-aadf-74437e016503', 'Assertion (A): Chemical equations must be balanced. Reason (R): Matter can neither be created nor destroyed in a chemical reaction.', null, '["Both A and R are true, and R is the correct explanation of A","Both A and R are true, but R is not the correct explanation of A","A is true but R is false","A is false but R is true"]'::jsonb, 0, 'Both true, and the law of conservation of mass is exactly why balancing is required. R explains A, so the first option.', 1, 'easy', 'assertion_reason', 3) on conflict (id) do update set prompt = excluded.prompt, options = excluded.options, correct_index = excluded.correct_index, explanation = excluded.explanation;
+insert into public.quiz_questions (id, quiz_id, prompt, stimulus, options, correct_index, explanation, marks, difficulty, question_type, sort_order) values ('9b9dbaa6-e68e-57d1-a4ee-f5eb32030e37', '4276896a-3af6-509f-aadf-74437e016503', 'What change would you observe, and why?', 'A white salt is heated strongly in a test tube. It turns yellow while hot, reverts to white on cooling, and a gas with the smell of burning sulphur is released.', '["The salt is zinc carbonate and the gas is CO₂","The salt is zinc sulphate; the yellow-while-hot, white-when-cold change is characteristic of zinc oxide","The salt is lead nitrate and the gas is NO₂","The salt is calcium carbonate and the gas is SO₂"]'::jsonb, 1, 'Zinc oxide is yellow when hot and white when cold — a classic identification point. The sulphur smell indicates SO₂, so the original salt was a sulphate. Lead nitrate gives brown fumes, not a sulphur smell.', 3, 'hard', 'case_study', 4) on conflict (id) do update set prompt = excluded.prompt, options = excluded.options, correct_index = excluded.correct_index, explanation = excluded.explanation;
+insert into public.session_subjects (id, session_id, subject_id, chapter_id, chapter_name, focus_topic, estimated_minutes, sort_order) values ('d1f719fd-cc03-52b0-9ecb-172e7d08f8b6', 'eb3b4a9f-a02e-5486-8660-c70c93609e0b', '4e91d7c3-6d76-5229-b8bd-6857078383c3', '866212fe-c1d0-5380-a102-52000b30664f', 'The Rise of Nationalism in Europe', 'Start The Rise of Nationalism in Europe — the concepts and the first half of the exercise.', 60, 2) on conflict (id) do update set focus_topic = excluded.focus_topic, estimated_minutes = excluded.estimated_minutes;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('70f7025c-66f4-5bfe-bc1f-cbc310745769', 'd1f719fd-cc03-52b0-9ecb-172e7d08f8b6', 'Read the chapter once without writing anything', null, 15, false, false, 0) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('1ac3ebea-06da-59c8-b0ae-063015d85cfc', 'd1f719fd-cc03-52b0-9ecb-172e7d08f8b6', 'Build the timeline or the flow of events', null, 10, false, false, 1) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('8312b577-ccaf-51eb-a796-c5df013e14a3', 'd1f719fd-cc03-52b0-9ecb-172e7d08f8b6', 'List the key terms and their meanings', null, 10, false, false, 2) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('cd3fef29-e27e-5f9e-a84d-21a0e58e1e4e', 'd1f719fd-cc03-52b0-9ecb-172e7d08f8b6', 'Write the likely 3-mark and 5-mark answers in points', 'Headings plus bullets. That is how the marking scheme awards marks.', 20, false, false, 3) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('51c66525-4fb2-5991-ac50-01b6a1c36d2d', 'd1f719fd-cc03-52b0-9ecb-172e7d08f8b6', 'Note two real examples you can quote', null, 5, false, false, 4) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('9e22911f-8ebf-5d61-b2de-d7777bec20c2', 'd1f719fd-cc03-52b0-9ecb-172e7d08f8b6', 'Map work for this chapter', null, 10, false, true, 5) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.session_subjects (id, session_id, subject_id, chapter_id, chapter_name, focus_topic, estimated_minutes, sort_order) values ('6293ab73-3b36-5e08-afad-f1bc40e5bf80', 'eb3b4a9f-a02e-5486-8660-c70c93609e0b', '07df4f0d-abba-593f-a724-cbb0b95bafa0', '2a54283b-4364-59f1-afbf-9d9be857f21e', 'Reading — Unseen Passages', 'Start Reading — Unseen Passages — the concepts and the first half of the exercise.', 30, 3) on conflict (id) do update set focus_topic = excluded.focus_topic, estimated_minutes = excluded.estimated_minutes;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('8caacec7-3295-5211-b10e-8ca454ad45b4', '6293ab73-3b36-5e08-afad-f1bc40e5bf80', 'Read the chapter or passage properly', null, 15, false, false, 0) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('e5ba6a8e-47a0-5bf2-ac0e-c4b26691b22a', '6293ab73-3b36-5e08-afad-f1bc40e5bf80', 'Note new words and their meanings', null, 5, false, false, 1) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('65a1efdc-ffa9-5626-9420-52fcc568fd92', '6293ab73-3b36-5e08-afad-f1bc40e5bf80', 'Answer the textbook questions in full sentences', null, 15, false, false, 2) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('924caebe-7b7e-5f73-9777-ef537a64bd20', '6293ab73-3b36-5e08-afad-f1bc40e5bf80', 'Practise the writing format for today', 'Format marks are awarded separately from content.', 10, false, false, 3) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.sessions (id, session_number, scheduled_date, phase, title, summary, focus_topics) values ('26c8b579-417b-5565-80f2-521295e275b0', 2, '2025-10-06', 'foundation', 'Day 2 — Real Numbers + The Rise of Nationalism in Europe', 'About 2.5 hours today. Maths first while your head is fresh.', array['Maths: Real Numbers', 'SSt: The Rise of Nationalism in Europe', 'Hindi: अपठित गद्यांश एवं काव्यांश']) on conflict (id) do update set title = excluded.title, summary = excluded.summary, focus_topics = excluded.focus_topics;
+insert into public.session_subjects (id, session_id, subject_id, chapter_id, chapter_name, focus_topic, estimated_minutes, sort_order) values ('c511b107-968a-580e-a3ea-1113238969c7', '26c8b579-417b-5565-80f2-521295e275b0', '9d8d5c4d-3c0e-5b0c-b895-3a70710ff2e4', '48b9999f-0a40-556e-95d6-5166881de186', 'Real Numbers', 'Finish Real Numbers — remaining questions, then practice and summary.', 75, 0) on conflict (id) do update set focus_topic = excluded.focus_topic, estimated_minutes = excluded.estimated_minutes;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('7f04ae43-569c-5586-a47b-b6806738eed2', 'c511b107-968a-580e-a3ea-1113238969c7', 'Read the concept from NCERT', 'Theory first, slowly. Do not skip the worked derivations.', 15, false, false, 0) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('2e78fc8d-874e-5db7-a034-cff3c5c0f5e8', 'c511b107-968a-580e-a3ea-1113238969c7', 'Solve the solved examples yourself', 'Cover the solution, try it, then compare line by line.', 20, false, false, 1) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('b75d3724-b6b2-50be-9382-cad81948f1d6', 'c511b107-968a-580e-a3ea-1113238969c7', 'Complete the NCERT exercise', 'Every question. This is the actual paper standard for Basic.', 30, false, false, 2) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('4c5874a8-804e-5e9a-8bdd-97b24e02afeb', 'c511b107-968a-580e-a3ea-1113238969c7', 'Mark the questions you could not solve', 'Put them in the mistake notebook rather than leaving them blank.', 5, false, false, 3) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('5a83c097-4276-5bf6-9da2-b0e2df18fe78', 'c511b107-968a-580e-a3ea-1113238969c7', 'Write the formulas into your formula sheet', null, 5, false, false, 4) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('e1604841-780c-5ad7-a060-43e050b4dab1', 'c511b107-968a-580e-a3ea-1113238969c7', 'Extra questions', 'Only once NCERT feels comfortable.', 20, false, true, 5) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('d531291e-9547-5a1e-bfd5-45c67e268092', 'c511b107-968a-580e-a3ea-1113238969c7', 'Higher-order application set', 'Standard paper practice.', 25, true, false, 6) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.resources (id, session_subject_id, kind, label, url, sort_order) values ('2c86da9b-5d0b-5640-b184-2e634ffdeb20', 'c511b107-968a-580e-a3ea-1113238969c7', 'ncert_pdf', 'NCERT chapter', 'https://ncert.nic.in/textbook/pdf/jemh101.pdf', 0) on conflict (id) do update set url = excluded.url;
+insert into public.quizzes (id, session_subject_id, subject_id, chapter_id, title, description) values ('0b7c6c57-d33c-5f25-963a-24e4f1a25985', 'c511b107-968a-580e-a3ea-1113238969c7', '9d8d5c4d-3c0e-5b0c-b895-3a70710ff2e4', '48b9999f-0a40-556e-95d6-5166881de186', 'Real Numbers', 'Six marks in the paper. Short, scoring, and worth getting fully right.') on conflict (id) do update set title = excluded.title;
+insert into public.quiz_questions (id, quiz_id, prompt, stimulus, options, correct_index, explanation, marks, difficulty, question_type, sort_order) values ('2ab5b0fa-0f52-5628-8d75-849ddf8e60b5', '0b7c6c57-d33c-5f25-963a-24e4f1a25985', 'The HCF of 96 and 404 is 4. What is their LCM?', null, '["9696","2424","4848","404"]'::jsonb, 0, 'HCF × LCM = product of the two numbers. 96 × 404 = 38784, and 38784 ÷ 4 = 9696. This identity only works for two numbers — do not try it with three.', 2, 'easy', 'mcq', 0) on conflict (id) do update set prompt = excluded.prompt, options = excluded.options, correct_index = excluded.correct_index, explanation = excluded.explanation;
+insert into public.quiz_questions (id, quiz_id, prompt, stimulus, options, correct_index, explanation, marks, difficulty, question_type, sort_order) values ('68110dff-074d-5808-af71-a1357d98cb87', '0b7c6c57-d33c-5f25-963a-24e4f1a25985', 'The decimal expansion of 13/3125 will:', null, '["Be non-terminating repeating","Terminate","Be irrational","Not exist"]'::jsonb, 1, '3125 = 5⁵, which is of the form 2ⁿ5ᵐ. A fraction in lowest terms terminates exactly when its denominator has only 2s and 5s as prime factors.', 1, 'easy', 'mcq', 1) on conflict (id) do update set prompt = excluded.prompt, options = excluded.options, correct_index = excluded.correct_index, explanation = excluded.explanation;
+insert into public.quiz_questions (id, quiz_id, prompt, stimulus, options, correct_index, explanation, marks, difficulty, question_type, sort_order) values ('f640183a-87d1-5b73-b2eb-4bf24effaa08', '0b7c6c57-d33c-5f25-963a-24e4f1a25985', 'If a number ends with the digit 0, it must be divisible by:', null, '["Only 2","Only 5","Both 2 and 5","Neither"]'::jsonb, 2, 'Ending in 0 means the number has 10 as a factor, and 10 = 2 × 5. This is the standard setup for "can 6ⁿ end in 0?" questions — 6ⁿ has no factor of 5, so it cannot.', 1, 'medium', 'mcq', 2) on conflict (id) do update set prompt = excluded.prompt, options = excluded.options, correct_index = excluded.correct_index, explanation = excluded.explanation;
+insert into public.quiz_questions (id, quiz_id, prompt, stimulus, options, correct_index, explanation, marks, difficulty, question_type, sort_order) values ('dd2bc4d5-93dd-558c-819f-9fb62a0db2d9', '0b7c6c57-d33c-5f25-963a-24e4f1a25985', 'Assertion (A): √2 is an irrational number. Reason (R): The square root of every prime number is irrational.', null, '["Both A and R are true, and R is the correct explanation of A","Both A and R are true, but R is not the correct explanation of A","A is true but R is false","A is false but R is true"]'::jsonb, 0, 'Both statements are true, and R is exactly the general fact that makes A true. Assertion-reason items are lost by students who check only whether both are true and forget to ask whether R explains A.', 1, 'medium', 'assertion_reason', 3) on conflict (id) do update set prompt = excluded.prompt, options = excluded.options, correct_index = excluded.correct_index, explanation = excluded.explanation;
+insert into public.quiz_questions (id, quiz_id, prompt, stimulus, options, correct_index, explanation, marks, difficulty, question_type, sort_order) values ('3867a2b6-6a93-5f8d-9b41-b430e6af75bf', '0b7c6c57-d33c-5f25-963a-24e4f1a25985', 'Three bells ring at intervals of 9, 12 and 15 minutes. If they ring together at 8:00 a.m., when do they next ring together?', 'A temple has three bells. The first rings every 9 minutes, the second every 12 minutes and the third every 15 minutes. All three are rung together at 8:00 a.m.', '["8:45 a.m.","9:00 a.m.","11:00 a.m.","12:00 noon"]'::jsonb, 2, 'They coincide again after the LCM of the three intervals. 9 = 3², 12 = 2²×3, 15 = 3×5, so LCM = 2²×3²×5 = 180 minutes = 3 hours. 8:00 a.m. + 3 hours = 11:00 a.m. The usual trap is adding the intervals instead of taking the LCM.', 2, 'medium', 'case_study', 4) on conflict (id) do update set prompt = excluded.prompt, options = excluded.options, correct_index = excluded.correct_index, explanation = excluded.explanation;
+insert into public.session_subjects (id, session_id, subject_id, chapter_id, chapter_name, focus_topic, estimated_minutes, sort_order) values ('d43b3f09-dcfe-580f-98d2-1f082d966ec6', '26c8b579-417b-5565-80f2-521295e275b0', '4e91d7c3-6d76-5229-b8bd-6857078383c3', '866212fe-c1d0-5380-a102-52000b30664f', 'The Rise of Nationalism in Europe', 'Finish The Rise of Nationalism in Europe — remaining questions, then practice and summary.', 50, 1) on conflict (id) do update set focus_topic = excluded.focus_topic, estimated_minutes = excluded.estimated_minutes;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('4e370139-a215-516b-8423-1cd48f9fc430', 'd43b3f09-dcfe-580f-98d2-1f082d966ec6', 'Read the chapter once without writing anything', null, 15, false, false, 0) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('196093d6-5494-5c2e-ac77-2df9579eec65', 'd43b3f09-dcfe-580f-98d2-1f082d966ec6', 'Build the timeline or the flow of events', null, 10, false, false, 1) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('d143b00e-15f6-5952-b254-f88384a2fd10', 'd43b3f09-dcfe-580f-98d2-1f082d966ec6', 'List the key terms and their meanings', null, 10, false, false, 2) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('1299e79a-e44e-5ed7-a280-97086fec5e6f', 'd43b3f09-dcfe-580f-98d2-1f082d966ec6', 'Write the likely 3-mark and 5-mark answers in points', 'Headings plus bullets. That is how the marking scheme awards marks.', 20, false, false, 3) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('17e9e0eb-f957-53e9-a312-260668613450', 'd43b3f09-dcfe-580f-98d2-1f082d966ec6', 'Note two real examples you can quote', null, 5, false, false, 4) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('e00063b4-e257-5d43-b115-1d3a534b0c4f', 'd43b3f09-dcfe-580f-98d2-1f082d966ec6', 'Map work for this chapter', null, 10, false, true, 5) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.session_subjects (id, session_id, subject_id, chapter_id, chapter_name, focus_topic, estimated_minutes, sort_order) values ('9143228f-b85d-593b-b5c3-a167c02de033', '26c8b579-417b-5565-80f2-521295e275b0', '6ccda25c-d4bb-5634-9e3a-c7cb8e50bb85', '434f8152-dce8-5b7e-b6eb-b9b0725abebf', 'अपठित गद्यांश एवं काव्यांश', 'Start अपठित गद्यांश एवं काव्यांश — the concepts and the first half of the exercise.', 25, 2) on conflict (id) do update set focus_topic = excluded.focus_topic, estimated_minutes = excluded.estimated_minutes;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('d5dbe704-312a-5219-a2dd-2133dc11942c', '9143228f-b85d-593b-b5c3-a167c02de033', 'पाठ को ध्यान से पढ़ें', null, 15, false, false, 0) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('d861e2a5-6f46-5f17-9d3d-c697c0f7f9db', '9143228f-b85d-593b-b5c3-a167c02de033', 'कठिन शब्दों के अर्थ लिखें', null, 5, false, false, 1) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('7d21327f-374f-5557-a20c-d5fdaa86cea7', '9143228f-b85d-593b-b5c3-a167c02de033', 'भावार्थ या सारांश अपने शब्दों में लिखें', null, 10, false, false, 2) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('4d38cc97-e944-5cbe-af0f-ac57b1406773', '9143228f-b85d-593b-b5c3-a167c02de033', 'पाठ्यपुस्तक के प्रश्न हल करें', null, 15, false, false, 3) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+insert into public.checklist_items (id, session_subject_id, label, detail, estimated_minutes, standard_only, is_optional, sort_order) values ('af2abdc8-8a63-5fc7-a6a5-95846a921777', '9143228f-b85d-593b-b5c3-a167c02de033', 'व्याकरण अभ्यास', null, 10, false, true, 4) on conflict (id) do update set label = excluded.label, detail = excluded.detail;
+
+commit;

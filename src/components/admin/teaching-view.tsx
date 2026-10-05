@@ -80,6 +80,16 @@ export function TeachingView({ connected }: { connected: boolean }) {
         supabase.from('mistakes').select('question, reattempt_on, resolved_at').eq('user_id', selected),
       ]);
 
+      // An empty list and a failed query are very different things. Never show
+      // zeros when the database actually said no.
+      const failed = checklist.error ?? attempts.error ?? chapters.error ?? log.error ?? mistakes.error ?? null;
+      if (failed) {
+        setError(failed.message);
+        setLoading(false);
+        return;
+      }
+      setError(null);
+
       setSnapshot({
         completedItemIds: new Set((checklist.data ?? []).map((r) => r.checklist_item_id as string)),
         attempts: (attempts.data ?? []).map((r) => ({

@@ -3,17 +3,25 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import { Menu, X } from 'lucide-react';
 import * as React from 'react';
-import { SidebarContent } from './sidebar';
+import { SidebarContent, type SidebarAccount } from './sidebar';
 import { ThemeToggle } from './theme-toggle';
 import { Button } from '@/components/ui/button';
 
-export function AppShell({ children, isAdmin }: { children: React.ReactNode; isAdmin?: boolean }) {
+export function AppShell({
+  children,
+  isAdmin,
+  account,
+}: {
+  children: React.ReactNode;
+  isAdmin?: boolean;
+  account?: SidebarAccount | null;
+}) {
   const [open, setOpen] = React.useState(false);
 
   return (
     <div className="min-h-dvh lg:grid lg:grid-cols-[272px_1fr]">
       <aside className="sticky top-0 hidden h-dvh border-r border-[var(--border)] bg-[var(--surface)] lg:block">
-        <SidebarContent isAdmin={isAdmin} />
+        <SidebarContent isAdmin={isAdmin} account={account} />
       </aside>
 
       <div className="flex min-w-0 flex-col">
@@ -33,7 +41,7 @@ export function AppShell({ children, isAdmin }: { children: React.ReactNode; isA
                     <X className="h-5 w-5" />
                   </Button>
                 </Dialog.Close>
-                <SidebarContent onNavigate={() => setOpen(false)} isAdmin={isAdmin} />
+                <SidebarContent onNavigate={() => setOpen(false)} isAdmin={isAdmin} account={account} />
               </Dialog.Content>
             </Dialog.Portal>
           </Dialog.Root>

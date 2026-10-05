@@ -3,6 +3,7 @@ import { createClient } from '@/lib/supabase/server';
 export type CurrentProfile = {
   userId: string | null;
   displayName: string;
+  email: string | null;
   isAdmin: boolean;
   signedIn: boolean;
 };
@@ -15,20 +16,21 @@ export type CurrentProfile = {
 export async function getCurrentProfile(): Promise<CurrentProfile> {
   const supabase = await createClient();
   if (!supabase) {
-    return { userId: null, displayName: 'Joyuu', isAdmin: true, signedIn: false };
+    return { userId: null, displayName: 'Joyuu', email: null, isAdmin: true, signedIn: false };
   }
 
   const {
     data: { user },
   } = await supabase.auth.getUser();
 
-  if (!user) return { userId: null, displayName: 'Joyuu', isAdmin: false, signedIn: false };
+  if (!user) return { userId: null, displayName: 'Joyuu', email: null, isAdmin: false, signedIn: false };
 
   const { data } = await supabase.from('profiles').select('display_name, role').eq('id', user.id).maybeSingle();
 
   return {
     userId: user.id,
     displayName: data?.display_name ?? 'Joyuu',
+    email: user.email ?? null,
     isAdmin: data?.role === 'admin',
     signedIn: true,
   };

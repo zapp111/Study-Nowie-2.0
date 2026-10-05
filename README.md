@@ -231,7 +231,9 @@ Includes SQL migration files, RLS policies, role-based admin access, indexes on 
 
 ## 8. Local setup
 
-Requires Node 18+ (developed on Node 22).
+Requires Node 18+ (developed on Node 22). **The app runs with no database at all** — the plan is built into the
+bundle and progress is kept on the device, so `npm install && npm run dev` gives you a working planner immediately.
+Connecting Supabase adds accounts and cross-device sync on top of exactly the same screens.
 
 ```bash
 git clone https://github.com/zapp111/Study-Nowie-2.0.git
@@ -248,7 +250,22 @@ npm run build      # production build
 npm run lint       # eslint
 npm run format     # prettier
 npm run typecheck  # tsc --noEmit
+npm run seed:sql   # regenerate supabase/seed/0001_content.sql from src/content
 ```
+
+### Where the content lives
+
+The plan is not a pile of hand-written rows. It is generated from three files, which are the single source of truth
+for both the app and the database:
+
+| File | What it holds |
+|---|---|
+| `src/content/subjects.ts` | All 97 chapters across the five papers, each with its board weightage and case-study frequency |
+| `src/content/checklists.ts` | Per-subject task templates — the Maths recovery loop, Science diagrams and equations, Social Science timelines and map work |
+| `src/content/quizzes.ts` | Chapter quizzes with explanations, mark values and question types |
+| `src/content/plan.ts` | The generator that turns all of it into 154 dated sessions |
+
+Change a chapter's weightage and the plan re-sorts itself. Run `npm run seed:sql` and the database matches again.
 
 ---
 

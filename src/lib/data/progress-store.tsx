@@ -11,6 +11,7 @@
  */
 
 import * as React from 'react';
+import { toast } from 'sonner';
 import { createClient } from '@/lib/supabase/client';
 import { isSupabaseConfigured } from '@/lib/supabase/config';
 import { todayIso } from '@/lib/utils';
@@ -118,7 +119,20 @@ function readLocal(): ProgressState {
 
 function randomId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID();
-  return Math.random().toString(36).slice(2);
+  // These ids are stored in uuid columns, so the fallback must be a valid uuid.
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = Math.floor(Math.random() * 16);
+    return (c === 'x' ? r : (r % 4) + 8).toString(16);
+  });
+}
+
+/**
+ * Supabase reports failures in the result instead of throwing. Every write
+ * must go through this, otherwise a rejected row disappears silently: the
+ * device copy looks fine while the database never got it.
+ */
+function saved({ error }: { error: { message: string } | null }) {
+  if (error) throw new Error(error.message);
 }
 
 const subscribeToNothing = () => () => {};
@@ -209,7 +223,11 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
           minutes: Object.fromEntries((log.data ?? []).map((row) => [row.logged_on, row.minutes])),
         }));
       } catch (cause) {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : 'Could not load your progress');
+        if (!cancelled) {
+          const message = cause instanceof Error ? cause.message : 'Could not load your progress';
+          setError(message);
+          toast.error('Could not load your progress from the database', { description: message });
+        }
       } finally {
         if (!cancelled) setSyncing(false);
       }
@@ -241,7 +259,11 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
         if (!user) return;
         await run(user.id);
       } catch (cause) {
-        setError(cause instanceof Error ? cause.message : 'Could not save that');
+        const message = cause instanceof Error ? cause.message : 'Could not save that';
+        setError(message);
+        toast.error('That did not reach the database', {
+          description: `${message} — it is still on this device, so try once more in a moment.`,
+        });
       }
     },
     [supabase],
@@ -259,12 +281,15 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
           .eq('user_id', userId)
           .eq('logged_on', day)
           .maybeSingle();
-        await supabase!
-          .from('study_log')
-          .upsert(
-            { user_id: userId, logged_on: day, minutes: (existing.data?.minutes ?? 0) + minutes },
-            { onConflict: 'user_id,logged_on' },
-          );
+        saved(existing);
+        saved(
+          await supabase!
+            .from('study_log')
+            .upsert(
+              { user_id: userId, logged_on: day, minutes: (existing.data?.minutes ?? 0) + minutes },
+              { onConflict: 'user_id,logged_on' },
+            ),
+        );
       });
     },
     [supabase, withUser],
@@ -290,14 +315,16 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
         });
         void withUser(async (userId) => {
           const isComplete = nowComplete;
-          await supabase!.from('checklist_progress').upsert(
-            {
-              user_id: userId,
-              checklist_item_id: itemId,
-              is_complete: isComplete,
-              completed_at: isComplete ? new Date().toISOString() : null,
-            },
-            { onConflict: 'user_id,checklist_item_id' },
+          saved(
+            await supabase!.from('checklist_progress').upsert(
+              {
+                user_id: userId,
+                checklist_item_id: itemId,
+                is_complete: isComplete,
+                completed_at: isComplete ? new Date().toISOString() : null,
+              },
+              { onConflict: 'user_id,checklist_item_id' },
+            ),
           );
         });
         if (minutes) {
@@ -311,97 +338,111 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
         const row: QuizAttempt = { ...attempt, id: randomId(), createdAt: new Date().toISOString() };
         setState((s) => ({ ...s, attempts: [row, ...s.attempts] }));
         void withUser(async (userId) => {
-          await supabase!.from('quiz_attempts').insert({
-            user_id: userId,
-            quiz_id: attempt.quizId,
-            score: attempt.score,
-            total: attempt.total,
-            responses: attempt.responses,
-          });
+          saved(
+            await supabase!.from('quiz_attempts').insert({
+              id: row.id,
+              user_id: userId,
+              quiz_id: attempt.quizId,
+              score: attempt.score,
+              total: attempt.total,
+              responses: attempt.responses,
+            }),
+          );
         });
       },
       setChapterState(chapterId, chapterState) {
         setState((s) => ({ ...s, chapters: { ...s.chapters, [chapterId]: chapterState } }));
         void withUser(async (userId) => {
-          await supabase!
-            .from('chapter_progress')
-            .upsert(
-              { user_id: userId, chapter_id: chapterId, state: chapterState },
-              { onConflict: 'user_id,chapter_id' },
-            );
+          saved(
+            await supabase!
+              .from('chapter_progress')
+              .upsert(
+                { user_id: userId, chapter_id: chapterId, state: chapterState },
+                { onConflict: 'user_id,chapter_id' },
+              ),
+          );
         });
       },
       addMistake(mistake) {
         const row: Mistake = { ...mistake, id: randomId(), resolvedAt: null, createdAt: new Date().toISOString() };
         setState((s) => ({ ...s, mistakes: [row, ...s.mistakes] }));
         void withUser(async (userId) => {
-          await supabase!.from('mistakes').insert({
-            user_id: userId,
-            chapter_id: mistake.chapterId,
-            question: mistake.question,
-            what_went_wrong: mistake.whatWentWrong,
-            correct_method: mistake.correctMethod,
-            source: mistake.source,
-            reattempt_on: mistake.reattemptOn,
-          });
+          saved(
+            await supabase!.from('mistakes').insert({
+              id: row.id,
+              user_id: userId,
+              chapter_id: mistake.chapterId,
+              question: mistake.question,
+              what_went_wrong: mistake.whatWentWrong,
+              correct_method: mistake.correctMethod,
+              source: mistake.source,
+              reattempt_on: mistake.reattemptOn,
+            }),
+          );
         });
       },
       resolveMistake(id) {
         const resolvedAt = new Date().toISOString();
         setState((s) => ({ ...s, mistakes: s.mistakes.map((m) => (m.id === id ? { ...m, resolvedAt } : m)) }));
         void withUser(async () => {
-          await supabase!.from('mistakes').update({ resolved_at: resolvedAt }).eq('id', id);
+          saved(await supabase!.from('mistakes').update({ resolved_at: resolvedAt }).eq('id', id));
         });
       },
       removeMistake(id) {
         setState((s) => ({ ...s, mistakes: s.mistakes.filter((m) => m.id !== id) }));
         void withUser(async () => {
-          await supabase!.from('mistakes').delete().eq('id', id);
+          saved(await supabase!.from('mistakes').delete().eq('id', id));
         });
       },
       addScore(score) {
         const row: TestScore = { ...score, id: randomId() };
         setState((s) => ({ ...s, scores: [row, ...s.scores] }));
         void withUser(async (userId) => {
-          await supabase!.from('test_scores').insert({
-            user_id: userId,
-            kind: score.kind,
-            title: score.title,
-            score: score.score,
-            max_score: score.maxScore,
-            taken_on: score.takenOn,
-          });
+          saved(
+            await supabase!.from('test_scores').insert({
+              id: row.id,
+              user_id: userId,
+              kind: score.kind,
+              title: score.title,
+              score: score.score,
+              max_score: score.maxScore,
+              taken_on: score.takenOn,
+            }),
+          );
         });
       },
       removeScore(id) {
         setState((s) => ({ ...s, scores: s.scores.filter((x) => x.id !== id) }));
         void withUser(async () => {
-          await supabase!.from('test_scores').delete().eq('id', id);
+          saved(await supabase!.from('test_scores').delete().eq('id', id));
         });
       },
       updateProfile(patch) {
         setState((s) => ({ ...s, profile: { ...s.profile, ...patch } }));
         void withUser(async (userId) => {
-          await supabase!
-            .from('profiles')
-            .update({
-              display_name: patch.displayName,
-              maths_level: patch.mathsLevel,
-              exam_date: patch.examDate,
-              daily_goal_minutes: patch.dailyGoalMinutes,
-            })
-            .eq('id', userId);
+          saved(
+            await supabase!
+              .from('profiles')
+              .update({
+                display_name: patch.displayName,
+                maths_level: patch.mathsLevel,
+                exam_date: patch.examDate,
+                daily_goal_minutes: patch.dailyGoalMinutes,
+              })
+              .eq('id', userId),
+          );
         });
       },
       resetProgress() {
         setState((s) => ({ ...EMPTY, profile: s.profile }));
         void withUser(async (userId) => {
-          await Promise.all([
+          const results = await Promise.all([
             supabase!.from('checklist_progress').delete().eq('user_id', userId),
             supabase!.from('quiz_attempts').delete().eq('user_id', userId),
             supabase!.from('chapter_progress').delete().eq('user_id', userId),
             supabase!.from('study_log').delete().eq('user_id', userId),
           ]);
+          results.forEach(saved);
         });
       },
     }),

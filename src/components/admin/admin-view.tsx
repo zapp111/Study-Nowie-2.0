@@ -12,12 +12,13 @@ import { ConfirmDialog } from '@/components/ui/dialog';
 import { Field, Input, Select, Textarea } from '@/components/ui/field';
 import { SUBJECT_LIST } from '@/lib/data/content';
 import { useContent } from '@/lib/data/content-store';
+import { QuizBuilder } from './quiz-builder';
 import { SessionForm } from './session-form';
 import { TeachingView } from './teaching-view';
 import { createClient } from '@/lib/supabase/client';
 import { formatDate } from '@/lib/utils';
 
-type Tab = 'sessions' | 'students' | 'questions' | 'papers';
+type Tab = 'sessions' | 'quizzes' | 'students' | 'questions' | 'papers';
 
 export function AdminView({ connected }: { connected: boolean }) {
   const [tab, setTab] = React.useState<Tab>('sessions');
@@ -44,6 +45,7 @@ export function AdminView({ connected }: { connected: boolean }) {
         {(
           [
             ['sessions', 'The plan'],
+            ['quizzes', 'Quizzes'],
             ['students', 'Her progress'],
             ['questions', 'Question bank'],
             ['papers', 'Papers'],
@@ -65,6 +67,7 @@ export function AdminView({ connected }: { connected: boolean }) {
       {tab === 'sessions' ? <SessionsAdmin connected={connected} /> : null}
       {tab === 'questions' ? <QuestionAdmin connected={connected} /> : null}
       {tab === 'papers' ? <PapersAdmin connected={connected} /> : null}
+      {tab === 'quizzes' ? <QuizBuilder connected={connected} /> : null}
       {tab === 'students' ? <TeachingView connected={connected} /> : null}
     </div>
   );

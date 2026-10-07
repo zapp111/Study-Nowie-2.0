@@ -1,6 +1,6 @@
 'use client';
 
-import { Database, Plus, Trash2 } from 'lucide-react';
+import { Database, Pencil, Plus, Trash2 } from 'lucide-react';
 import * as React from 'react';
 import { toast } from 'sonner';
 import { PageHeader } from '@/components/layout/page-header';
@@ -12,13 +12,14 @@ import { ConfirmDialog } from '@/components/ui/dialog';
 import { Field, Input, Select, Textarea } from '@/components/ui/field';
 import { SUBJECT_LIST } from '@/lib/data/content';
 import { useContent } from '@/lib/data/content-store';
+import { GreetingAdmin } from './greeting-admin';
 import { QuizBuilder } from './quiz-builder';
 import { SessionForm } from './session-form';
 import { TeachingView } from './teaching-view';
 import { createClient } from '@/lib/supabase/client';
 import { formatDate } from '@/lib/utils';
 
-type Tab = 'sessions' | 'quizzes' | 'students' | 'questions' | 'papers';
+type Tab = 'sessions' | 'quizzes' | 'greeting' | 'students' | 'questions' | 'papers';
 
 export function AdminView({ connected }: { connected: boolean }) {
   const [tab, setTab] = React.useState<Tab>('sessions');
@@ -46,6 +47,7 @@ export function AdminView({ connected }: { connected: boolean }) {
           [
             ['sessions', 'The plan'],
             ['quizzes', 'Quizzes'],
+            ['greeting', 'A note for her'],
             ['students', 'Her progress'],
             ['questions', 'Question bank'],
             ['papers', 'Papers'],
@@ -68,6 +70,7 @@ export function AdminView({ connected }: { connected: boolean }) {
       {tab === 'questions' ? <QuestionAdmin connected={connected} /> : null}
       {tab === 'papers' ? <PapersAdmin connected={connected} /> : null}
       {tab === 'quizzes' ? <QuizBuilder connected={connected} /> : null}
+      {tab === 'greeting' ? <GreetingAdmin connected={connected} /> : null}
       {tab === 'students' ? <TeachingView connected={connected} /> : null}
     </div>
   );
@@ -76,6 +79,7 @@ export function AdminView({ connected }: { connected: boolean }) {
 function SessionsAdmin({ connected }: { connected: boolean }) {
   const { sessions, fromDatabase, refresh, loading } = useContent();
   const [adding, setAdding] = React.useState(false);
+  const [editingId, setEditingId] = React.useState<string | null>(null);
   const nextNumber = sessions.reduce((max, s) => Math.max(max, s.number), 0) + 1;
 
   return (
@@ -86,7 +90,14 @@ function SessionsAdmin({ connected }: { connected: boolean }) {
             ? `${sessions.length} day${sessions.length === 1 ? '' : 's'} in the plan.`
             : 'Showing the two starter days built into the app. Anything you add here replaces them.'}
         </p>
-        <Button size="sm" onClick={() => setAdding((a) => !a)} disabled={!connected}>
+        <Button
+          size="sm"
+          onClick={() => {
+            setEditingId(null);
+            setAdding((a) => !a);
+          }}
+          disabled={!connected}
+        >
           <Plus className="h-4 w-4" /> Add a day
         </Button>
       </div>
@@ -104,13 +115,37 @@ function SessionsAdmin({ connected }: { connected: boolean }) {
 
       {loading ? <Card>Loading…</Card> : null}
 
-      {sessions.map((session) => (
-        <Card key={session.id} className="space-y-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge tone="neutral">Day {session.number}</Badge>
-            <span className="text-xs text-[var(--text-muted)]">{formatDate(session.date)}</span>
-            <div className="ml-auto flex gap-1">
-              <ConfirmDialog
+      {sessions.map((session) =>
+        editingId === session.id ? (
+          <SessionForm
+            key={session.id}
+            nextNumber={nextNumber}
+            session={session}
+            onCancel={() => setEditingId(null)}
+            onSaved={async () => {
+              setEditingId(null);
+              await refresh();
+            }}
+          />
+        ) : (
+          <Card key={session.id} className="space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge tone="neutral">Day {session.number}</Badge>
+              <span className="text-xs text-[var(--text-muted)]">{formatDate(session.date)}</span>
+              <div className="ml-auto flex gap-1">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={!connected || !fromDatabase}
+                  aria-label={`Edit day ${session.number}`}
+                  onClick={() => {
+                    setAdding(false);
+                    setEditingId(session.id);
+                  }}
+                >
+                  <Pencil className="h-4 w-4" />
+                </Button>
+                <ConfirmDialog
                 trigger={
                   <Button
                     variant="ghost"
@@ -136,17 +171,18 @@ function SessionsAdmin({ connected }: { connected: boolean }) {
                   toast.success('Deleted');
                   await refresh();
                 }}
-              />
+                />
+              </div>
             </div>
-          </div>
-          <p className="text-sm font-medium">{session.title}</p>
-          <div className="flex flex-wrap gap-1.5">
-            {session.blocks.map((b) => (
-              <SubjectPill key={b.id} accent={b.accent} label={`${b.shortName} · ${b.chapterName}`} />
-            ))}
-          </div>
-        </Card>
-      ))}
+            <p className="text-sm font-medium">{session.title}</p>
+            <div className="flex flex-wrap gap-1.5">
+              {session.blocks.map((b) => (
+                <SubjectPill key={b.id} accent={b.accent} label={`${b.shortName} · ${b.chapterName}`} />
+              ))}
+            </div>
+          </Card>
+        ),
+      )}
     </div>
   );
 }

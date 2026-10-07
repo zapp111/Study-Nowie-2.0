@@ -220,10 +220,15 @@ export function ContentProvider({ children }: { children: React.ReactNode }) {
       if (queryError) throw queryError;
 
       setError(null);
-      // The schedule has been deliberately cleared. Do not resurrect old
-      // published rows from a database that has not run the cleanup migration.
-      setSessions(BUNDLED_SESSIONS);
-      setFromDatabase(false);
+      const rows = (data ?? []) as unknown as SessionRow[];
+      if (rows.length) {
+        setSessions(rows.map(mapRow));
+        setFromDatabase(true);
+      } else {
+        // Nothing in the database yet, so fall back to the bundled starter plan.
+        setSessions(BUNDLED_SESSIONS);
+        setFromDatabase(false);
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not load the study plan');
     } finally {

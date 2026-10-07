@@ -36,6 +36,10 @@ yarn-error.log*
 # vercel
 .vercel
 
+# study material and the writing reference — these are personal and live in
+# the workspace and in Drive, not in a public repo
+/content
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

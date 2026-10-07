@@ -3,6 +3,7 @@
 import { ArrowRight, BookOpen, CalendarClock, CheckCircle2, Flame, NotebookPen, Sparkles, Target } from 'lucide-react';
 import Link from 'next/link';
 import * as React from 'react';
+import { GreetingCard } from '@/components/dashboard/greeting-card';
 import { SubjectPill } from '@/components/sessions/subject-pill';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -70,6 +71,7 @@ export function DashboardView({ fallbackName }: { fallbackName: string }) {
         <h1 className="text-2xl font-semibold tracking-tight">
           <span suppressHydrationWarning>{greeting()}</span>, {name}
         </h1>
+        <GreetingCard />
         <EmptyState
           icon={CalendarClock}
           title="Nothing scheduled yet"
@@ -87,6 +89,8 @@ export function DashboardView({ fallbackName }: { fallbackName: string }) {
           <span suppressHydrationWarning>{greeting()}</span>, {name}
         </h1>
       </header>
+
+      <GreetingCard />
 
       {/* Countdown, framed with what is done rather than as a bare number. */}
       <Card className="rise flex flex-col gap-5 bg-gradient-to-br from-[var(--accent-soft)] to-[var(--surface)] sm:flex-row sm:items-center sm:justify-between">
